@@ -1,0 +1,12 @@
+.DS_Store
+.env
+creds
+creds_yandex
+**/.venv/
+**/venv/
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
