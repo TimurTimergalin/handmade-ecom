@@ -1,17 +1,14 @@
 "use client";
 
-import { useState } from "react";
-
 import { AddToCartButton } from "./AddToCartButton";
 import { BuyNowButton } from "./BuyNowButton";
-import { DeliverySelector } from "./DeliverySelector";
-import { SALE_MODE_LABELS } from "@/lib/constants";
-import type { DeliveryMethod, Product } from "@/types";
+import { SALE_MODE_LABELS, saleAvailability } from "@/lib/constants";
+import type { Product } from "@/types";
 
 export function ProductActions({ product }: { product: Product }) {
-  const [delivery, setDelivery] = useState<DeliveryMethod>(product.availableDeliveries[0]);
+  const availability = saleAvailability(product);
 
-  if (product.saleMode === "out_of_stock") {
+  if (availability === "out_of_stock") {
     return (
       <div className="bg-muted text-muted-foreground rounded-lg px-4 py-3 text-center text-sm">
         {SALE_MODE_LABELS.out_of_stock}
@@ -19,7 +16,7 @@ export function ProductActions({ product }: { product: Product }) {
     );
   }
 
-  if (product.saleMode === "deal_only") {
+  if (availability === "deal_only") {
     return (
       <div className="rounded-lg border border-dashed px-4 py-3 text-sm">
         <div className="mb-1 font-medium">Товар продаётся по сделке</div>
@@ -32,22 +29,15 @@ export function ProductActions({ product }: { product: Product }) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <DeliverySelector
-        available={product.availableDeliveries}
-        value={delivery}
-        onChange={setDelivery}
+    <div className="grid w-full grid-cols-2 gap-2 md:gap-3">
+      <AddToCartButton
+        productId={product.id}
+        saleMode={product.saleMode}
+        className="mt-0 box-border h-11 w-full rounded-lg border border-transparent px-4 py-0 text-sm"
+        counterClassName="box-border h-11 w-full rounded-lg"
+        maxQuantity={product.inStock}
       />
-
-      <div className="flex flex-wrap gap-3">
-        <AddToCartButton
-          productId={product.id}
-          saleMode={product.saleMode}
-          delivery={delivery}
-          className="mt-0 rounded-lg px-6 py-3 text-sm"
-        />
-        <BuyNowButton productId={product.id} delivery={delivery} />
-      </div>
+      <BuyNowButton productId={product.id} className="box-border h-11 w-full px-4 py-0" />
     </div>
   );
 }

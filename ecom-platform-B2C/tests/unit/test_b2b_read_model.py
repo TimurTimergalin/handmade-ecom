@@ -133,7 +133,7 @@ def test_product_event_maps_into_upsert_payload(monkeypatch: pytest.MonkeyPatch)
                 "sellerId": seller_id,
                 "saleMode": "online",
                 "availableDeliveries": ["pickup"],
-                "pickupPoints": [{"city": "Казань", "address": "Баумана 1"}],
+                "pickupPoints": [{"city": "Казань", "address": "Баумана 1", "maxDays": 4}],
                 "dealContacts": None,
                 "inStock": 3,
                 "currency": "RUB",
@@ -142,14 +142,67 @@ def test_product_event_maps_into_upsert_payload(monkeypatch: pytest.MonkeyPatch)
         )
         assert kafka.product_deleted({"deletedAt": None}) is False
         assert kafka.product_deleted({"deletedAt": "2024-01-01T00:00:00Z"}) is True
+        from datetime import UTC, datetime
+        from decimal import Decimal
+
+        from routes import ProductOut
+
+        product_out = ProductOut(
+            id=uuid.UUID(product_id),
+            slug="mug",
+            title="Кружка",
+            subtitle=None,
+            description=None,
+            seller_id=uuid.UUID(seller_id),
+            category_id=None,
+            images=[],
+            attributes=[],
+            tags=[],
+            rating=Decimal("0.0"),
+            reviews_count=0,
+            is_active=True,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            pickup_points=[{"city": "Казань", "address": "Баумана 1", "maxDays": 4}],
+        )
+        assert product_out.pickup_points == [
+            {"city": "Казань", "address": "Баумана 1", "maxDays": 4}
+        ]
+        legacy_out = product_out.model_copy(
+            update={"pickup_points": [{"city": "Казань", "address": "Баумана 1"}]}
+        )
+        assert legacy_out.pickup_points == [{"city": "Казань", "address": "Баумана 1"}]
     assert mapped["id"] == product_id
     assert mapped["slug"] == product_id
     assert mapped["seller_id"] == seller_id
     assert mapped["images"] == [{"url": "https://cdn.example/mug.jpg"}]
+    gallery_source = {
+        "id": product_id,
+        "title": "Кружка",
+        "image": "https://cdn.example/ignored.jpg",
+        "images": [
+            "https://cdn.example/mug.jpg",
+            {"url": "https://cdn.example/mug-side.jpg"},
+        ],
+        "sellerId": seller_id,
+    }
+    gallery = kafka.product_to_upsert_payload(gallery_source)
+    assert gallery["images"] == [
+        {"url": "https://cdn.example/mug.jpg"},
+        {"url": "https://cdn.example/mug-side.jpg"},
+    ]
     assert mapped["is_active"] is True
     assert mapped["sale_mode"] == "online"
     assert mapped["available_deliveries"] == ["pickup"]
-    assert mapped["pickup_points"] == [{"city": "Казань", "address": "Баумана 1"}]
+    assert mapped["pickup_points"] == [{"city": "Казань", "address": "Баумана 1", "maxDays": 4}]
+    legacy = kafka.product_to_upsert_payload(
+        {
+            "id": product_id,
+            "title": "Кружка",
+            "sellerId": seller_id,
+            "pickupPoints": [{"city": "Казань", "address": "Баумана 1"}],
+        }
+    )
+    assert legacy["pickup_points"] == [{"city": "Казань", "address": "Баумана 1"}]
     assert mapped["deal_contacts"] is None
     offer = mapped["offers"][0]
     assert offer["id"] == product_id

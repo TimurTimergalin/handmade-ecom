@@ -142,6 +142,11 @@ async def test_owner_service_read_contract_and_draft_privacy(cluster, seller):
     ) as internal:
         products = await internal.get("http://goods/api/internal/products")
         assert products.status_code == 200, products.text
+        accepted_product = await internal.post(
+            f"http://goods/api/internal/moderation/products/{pid}/accept"
+        )
+        assert accepted_product.status_code == 200, accepted_product.text
+        products = await internal.get("http://goods/api/internal/products")
         assert products.json()["data"]["total"] == 1
         assert (await internal.get(f"http://goods/api/internal/products/{pid}")).json()["data"][
             "sellerId"
@@ -153,6 +158,10 @@ async def test_owner_service_read_contract_and_draft_privacy(cluster, seller):
             "total"
         ] == 0
         await cluster.client.post(f"/api/seller/posts/{draft}/publish")
+        accepted = await internal.post(
+            f"http://publications/api/internal/moderation/posts/{draft}/accept"
+        )
+        assert accepted.status_code == 200, accepted.text
         listed = await internal.get(
             "http://publications/api/internal/posts", params={"q": "Текст", "sellerId": store["id"]}
         )

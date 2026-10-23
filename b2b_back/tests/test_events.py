@@ -12,7 +12,29 @@ from sqlalchemy.exc import OperationalError
 from marketplace.shared.messaging.models import tables_for
 from marketplace.shared.messaging.runtime import KafkaRuntime
 from marketplace.shared.messaging.schema import EVENTS
-from tests.conftest import onboard, product
+import httpx
+
+from tests.conftest import KEY, onboard, product
+
+
+async def accept_post(cluster, post_id: str) -> None:
+    async with httpx.AsyncClient(
+        transport=cluster.transport, headers={"X-Service-Key": KEY}
+    ) as client:
+        response = await client.post(
+            f"http://publications/api/internal/moderation/posts/{post_id}/accept"
+        )
+        assert response.status_code == 200, response.text
+
+
+async def accept_product(cluster, product_id: str) -> None:
+    async with httpx.AsyncClient(
+        transport=cluster.transport, headers={"X-Service-Key": KEY}
+    ) as client:
+        response = await client.post(
+            f"http://goods/api/internal/moderation/products/{product_id}/accept"
+        )
+        assert response.status_code == 200, response.text
 
 
 def record(event, settings, *, offset=0, value=None, topic=None, key=None):
@@ -49,9 +71,11 @@ async def test_domain_changes_record_all_seven_event_types_once(cluster, seller)
     store, media = seller
     await onboard(cluster.client)  # Idempotent onboarding must not emit seller.created twice.
     item = (await product(cluster.client, media["url"])).json()["data"]
+    await accept_product(cluster, item["id"])
     assert (
         await cluster.client.patch(f"/api/products/{item['id']}", json={"price": 2000})
     ).status_code == 200
+    await accept_product(cluster, item["id"])
     draft = (await cluster.client.post("/api/posts", json={"title": "Draft"})).json()["data"]
     assert not await outbox(cluster.apps["publications"])
     assert (
@@ -64,9 +88,11 @@ async def test_domain_changes_record_all_seven_event_types_once(cluster, seller)
             },
         )
     ).status_code == 200
+    await accept_post(cluster, draft["id"])
     assert (
         await cluster.client.patch(f"/api/posts/{draft['id']}", json={"title": "Changed"})
     ).status_code == 200
+    await accept_post(cluster, draft["id"])
     assert (await cluster.client.delete(f"/api/posts/{draft['id']}")).status_code == 200
     assert (await cluster.client.delete(f"/api/products/{item['id']}")).status_code == 200
     expected = {

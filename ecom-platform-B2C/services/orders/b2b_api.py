@@ -21,9 +21,11 @@ from processor import processor_url
 from routes import (
     SessionDep,
     cancel_seller_order,
+    complete_order,
     deliver_order,
     external_status,
     ship_order,
+    sync_cdek_progress,
     sync_processor_payment,
 )
 
@@ -33,7 +35,9 @@ _STATUS_FILTER = {
     "created": (OrderStatus.CREATED,),
     "paid": (OrderStatus.PAID, OrderStatus.ASSEMBLING),
     "shipped": (OrderStatus.SHIPPED,),
+    "delivering": (OrderStatus.DELIVERING,),
     "delivered": (OrderStatus.DELIVERED,),
+    "completed": (OrderStatus.COMPLETED,),
     "cancelled": (OrderStatus.CANCELLED,),
 }
 
@@ -41,7 +45,7 @@ _STATUS_FILTER = {
 class SellerStatusBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    status: Literal["shipped", "delivered", "cancelled"]
+    status: Literal["shipped", "delivered", "completed", "cancelled"]
     tracking_number: str | None = Field(default=None, max_length=120, alias="trackingNumber")
 
 
@@ -69,6 +73,7 @@ def _order_data(order: Order, seller_id: uuid.UUID) -> dict:
             for item in lines
         ],
         "total": int(order.total_amount),
+        "delivery": getattr(order.delivery_method, "value", order.delivery_method),
         "trackingNumber": order.tracking_number,
         "seller": {"id": str(seller_id)},
     }
@@ -87,7 +92,12 @@ def _seller_query(seller_id: uuid.UUID, status: str | None, q: str | None):
         allowed = _STATUS_FILTER.get(status)
         if allowed is None:
             raise BadRequestError("Unknown order status")
-        stmt = stmt.where(Order.status.in_(allowed))
+        stmt = stmt.where(
+            or_(
+                (Order.status_override.is_(None) & Order.status.in_(allowed)),
+                Order.status_override.in_(allowed),
+            )
+        )
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(
@@ -155,6 +165,7 @@ async def get_seller_order(
         raise BadRequestError("role must be seller")
     order = await _seller_order(session, order_id, seller_id)
     order = await sync_processor_payment(session, order)
+    order = await sync_cdek_progress(session, order)
     return _envelope(_order_data(order, seller_id))
 
 
@@ -169,12 +180,21 @@ async def patch_seller_order_status(
     del idempotency_key
     order = await _seller_order(session, order_id, seller_id)
     order = await sync_processor_payment(session, order)
+    if order.status_override is not None:
+        order.status_override = None
+        await session.flush()
     if external_status(order) == body.status:
         return _envelope(_order_data(order, seller_id))
     if body.status == "shipped":
         order = await ship_order(session, order, body.tracking_number)
     elif body.status == "delivered":
-        order = await deliver_order(session, order, body.tracking_number)
+        method = getattr(order.delivery_method, "value", order.delivery_method)
+        if method == "pickup" and order.status in {OrderStatus.PAID, OrderStatus.ASSEMBLING}:
+            order = await ship_order(session, order, None)
+        else:
+            order = await deliver_order(session, order, body.tracking_number)
+    elif body.status == "completed":
+        order = await complete_order(session, order, body.tracking_number)
     else:
         order = await cancel_seller_order(session, order)
     return _envelope(_order_data(order, seller_id))
@@ -194,7 +214,9 @@ async def seller_orders_summary(seller_id: uuid.UUID, session: SessionDep) -> JS
         {
             "newOrdersCount": sum(order.status is OrderStatus.CREATED for order in orders),
             "awaitingShipmentCount": sum(order.status is OrderStatus.PAID for order in orders),
-            "shippedOrdersCount": sum(order.status is OrderStatus.SHIPPED for order in orders),
+            "shippedOrdersCount": sum(
+                order.status in {OrderStatus.SHIPPED, OrderStatus.DELIVERING} for order in orders
+            ),
             "totalOrdersCount": len(orders),
             "recentOrders": [_order_data(order, seller_id) for order in orders[:5]],
         }

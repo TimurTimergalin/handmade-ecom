@@ -56,8 +56,8 @@ def configure_sdk(settings: Settings) -> None:
     global return_url, fake
     return_url = settings.yookassa_return_url
     fake = settings.yookassa_fake
-    if fake:
-        return
+    # Заказы в локальном режиме остаются заглушкой. Подписка Premium — обычный
+    # платёж тестового магазина, поэтому ключи ЮKassa настраиваются всегда.
     Configuration.configure(
         settings.yookassa_account_id,
         settings.yookassa_secret_key,

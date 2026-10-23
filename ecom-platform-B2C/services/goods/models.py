@@ -51,7 +51,8 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(default=True)
     sale_mode: Mapped[str] = mapped_column(String(32), default="online")
     available_deliveries: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    pickup_points: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB, nullable=True)
+    pickup_points: Mapped[list[dict[str, str | int]] | None] = mapped_column(JSONB, nullable=True)
+    cdek_ship_days: Mapped[list[int]] = mapped_column(JSONB, default=list)
     deal_contacts: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     category: Mapped[Category | None] = relationship(lazy="joined")

@@ -33,6 +33,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_yandex_id ON users (yandex_id)")
         )
+        for statement in (
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS legal_type VARCHAR(16)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS last_name VARCHAR(100)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS first_name VARCHAR(100)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS patronymic VARCHAR(100)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS legal_name VARCHAR(300)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS inn VARCHAR(12)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS ogrn VARCHAR(15)",
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS legal_address TEXT",
+        ):
+            await conn.execute(text(statement))
     yield
     await db.dispose()
 

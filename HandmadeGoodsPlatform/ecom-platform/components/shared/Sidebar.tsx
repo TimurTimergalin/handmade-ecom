@@ -24,7 +24,10 @@ export function Sidebar() {
       <div className="mb-6 text-lg font-bold">Кабинет продавца</div>
       <nav className="flex flex-col gap-1">
         {NAV_ITEMS.map((item) => {
-          const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
+          const isActive =
+            item.href === ROUTES.seller.dashboard
+              ? pathname === item.href
+              : pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
               key={item.href}

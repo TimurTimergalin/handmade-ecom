@@ -83,8 +83,20 @@ export function PostsManager({ posts }: { posts: Post[] }) {
 
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{post.title}</div>
+                  {post.moderationStatus === "pending" && (
+                    <div className="text-xs text-amber-700">На модерации</div>
+                  )}
+                  {post.moderationStatus === "rejected" && (
+                    <div className="text-xs text-red-700">Отклонена</div>
+                  )}
+                  {post.draftStatus === "pending" && (
+                    <div className="text-xs text-amber-700">Изменения на модерации</div>
+                  )}
+                  {post.draftStatus === "rejected" && (
+                    <div className="text-xs text-red-700">Изменения отклонены</div>
+                  )}
                   <div className="text-muted-foreground mt-1 text-xs">
-                    {timeAgo(post.createdAt)} · {post.products.length} товаров · ♥ {post.likesCount}
+                    {timeAgo(post.createdAt)} · {post.products.length} товаров
                   </div>
                 </div>
 

@@ -1,46 +1,100 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { MapPin, Truck } from "lucide-react";
 
-import { createOrder } from "@/services/api";
+import { CdekWidget, type CdekOfficeSelection } from "@/components/features/CdekWidget";
+import { CDEK_PHONE_HINT } from "@/components/features/DeliveryBlock";
+import { createOrder, quoteCdekDelivery } from "@/services/api";
+import { useAuthStore } from "@/store/auth";
 import { useCartStore } from "@/store/cart";
-import { groupCartItems, calculateTotal } from "@/lib/cart-utils";
-import { ROUTES, DELIVERY_LABELS } from "@/lib/constants";
-import { formatPrice, pluralize, cn } from "@/lib/utils";
-import type { PickupPoint, Product } from "@/types";
+import { calculateTotal, deliveryMethodsForGroup, groupCartItems } from "@/lib/cart-utils";
+import { DELIVERY_LABELS, ROUTES } from "@/lib/constants";
+import { cn, formatPrice, pluralize } from "@/lib/utils";
+import type { CartGroup, DeliveryMethod, PickupPoint, Product } from "@/types";
 
-interface ContactInfo {
-  name: string;
-  phone: string;
-  email: string;
+interface CdekOffice {
+  code: string;
+  city: string;
+  street: string;
+  label: string;
+  selectedAt: number;
+}
+
+interface CdekQuoteState {
+  signature: string;
+  price?: number;
+  error?: string;
+  loading?: boolean;
 }
 
 export function CheckoutContent({ allProducts }: { allProducts: Product[] }) {
   const router = useRouter();
   const items = useCartStore((s) => s.items);
   const clear = useCartStore((s) => s.clear);
+  const phone = useAuthStore((state) => state.user?.phone)?.trim() ?? "";
+  const cdekAllowed = phone.length > 0;
 
-  const [contact, setContact] = useState<ContactInfo>({
-    name: "",
-    phone: "",
-    email: "",
-  });
-
-  // Для каждой группы: выбранная точка самовывоза (индекс) или адрес СДЭК
+  const [deliveryChoice, setDeliveryChoice] = useState<Record<string, DeliveryMethod>>({});
   const [pickupSelection, setPickupSelection] = useState<Record<string, number>>({});
-  const [cdekAddress, setCdekAddress] = useState<Record<string, { city: string; address: string }>>(
-    {}
-  );
-
+  const [cdekOffice, setCdekOffice] = useState<Record<string, CdekOffice>>({});
+  const [cdekQuotes, setCdekQuotes] = useState<Record<string, CdekQuoteState>>({});
+  const [cdekWidgetGroup, setCdekWidgetGroup] = useState<string | null>(null);
   const [isPaying, setIsPaying] = useState(false);
+  const cdekWidgetGroupRef = useRef<string | null>(null);
+  const quoteTargetsRef = useRef<CdekQuoteTarget[]>([]);
 
-  const productById = new Map(allProducts.map((p) => [p.id, p]));
+  const productById = new Map(allProducts.map((product) => [product.id, product]));
   const groups = groupCartItems(items, allProducts);
-  const total = calculateTotal(groups, allProducts);
+  const orderableGroups = groups.filter((group) => group.items.length > 0);
+  const quoteTargets = cdekQuoteTargets(orderableGroups, productById, deliveryChoice, cdekOffice);
+  quoteTargetsRef.current = quoteTargets;
+  const quoteTargetsKey = quoteTargets.map((target) => `${target.groupKey}:${target.signature}`).join(";");
+
+  useEffect(() => {
+    const targets = quoteTargetsRef.current;
+    if (targets.length === 0) return;
+    let cancelled = false;
+    for (const target of targets) {
+      setCdekQuotes((prev) => ({
+        ...prev,
+        [target.groupKey]: { signature: target.signature, loading: true },
+      }));
+      quoteCdekDelivery({
+        sellerId: target.sellerId,
+        toOfficeCode: target.code,
+        itemCount: target.itemCount,
+      })
+        .then((price) => {
+          if (cancelled) return;
+          setCdekQuotes((prev) => ({
+            ...prev,
+            [target.groupKey]: { signature: target.signature, price },
+          }));
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const message = error instanceof Error ? error.message : "Не удалось рассчитать доставку";
+          setCdekQuotes((prev) => ({
+            ...prev,
+            [target.groupKey]: { signature: target.signature, error: message },
+          }));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [quoteTargetsKey]);
+
+  const goodsTotal = calculateTotal(groups, allProducts);
+  const deliveryTotal = orderableGroups.reduce((sum, group) => {
+    const price = readyCdekPrice(group, productById, deliveryChoice, cdekOffice, cdekQuotes);
+    return sum + (price ?? 0);
+  }, 0);
+  const total = goodsTotal + deliveryTotal;
 
   if (items.length === 0) {
     return (
@@ -56,69 +110,95 @@ export function CheckoutContent({ allProducts }: { allProducts: Product[] }) {
     );
   }
 
-  const isContactValid =
-    contact.name.trim().length > 0 &&
-    contact.phone.trim().length > 0 &&
-    contact.email.includes("@");
-
-  const areGroupsValid = groups.every((g) => {
-    if (g.items.length === 0) return true;
-    if (g.delivery === "pickup") {
-      return pickupSelection[g.key] !== undefined;
-    }
-    const addr = cdekAddress[g.key];
-    return addr && addr.city.trim() && addr.address.trim();
+  const areGroupsValid = orderableGroups.every((group) =>
+    isGroupReady(
+      group,
+      productById,
+      deliveryChoice,
+      pickupSelection,
+      cdekOffice,
+      cdekQuotes,
+      cdekAllowed
+    )
+  );
+  const cdekPending = orderableGroups.some((group) => {
+    const available = deliveryMethodsForGroup(group, productById);
+    const delivery = selectedDelivery(group.key, available, deliveryChoice);
+    if (delivery !== "cdek") return false;
+    return readyCdekPrice(group, productById, deliveryChoice, cdekOffice, cdekQuotes) === undefined;
   });
 
-  const canPay = isContactValid && areGroupsValid && !isPaying;
+  const canPay = areGroupsValid && orderableGroups.length > 0 && !isPaying;
+
+  function rememberCdekWidgetGroup(groupKey: string | null) {
+    cdekWidgetGroupRef.current = groupKey;
+    setCdekWidgetGroup(groupKey);
+  }
+
+  function handleCdekSelect(office: CdekOfficeSelection) {
+    const groupKey = cdekWidgetGroupRef.current;
+    if (!groupKey) return;
+    const city = office.city?.trim() ?? "";
+    const label = office.address.trim();
+    let street = label;
+    if (city && street.toLowerCase().startsWith(city.toLowerCase())) {
+      street = street.slice(city.length).replace(/^[\s,]+/, "");
+    }
+    setCdekOffice((prev) => ({
+      ...prev,
+      [groupKey]: {
+        code: office.code,
+        city,
+        street: street || label,
+        label,
+        selectedAt: Date.now(),
+      },
+    }));
+    rememberCdekWidgetGroup(null);
+  }
 
   async function handlePay() {
     if (!canPay) return;
 
-    const orderGroups = groups
-      .filter((group) => group.items.length > 0)
-      .map((group) => {
-        const payload: {
-          sellerId: string;
-          delivery: typeof group.delivery;
-          items: { productId: string; quantity: number }[];
-          pickupPoint?: PickupPoint;
-        } = {
-          sellerId: group.seller.id,
-          delivery: group.delivery,
-          items: group.items.map((item) => ({
-            productId: item.productId,
-            quantity: item.quantity,
-          })),
-        };
+    const orderGroups = orderableGroups.map((group) => {
+      const available = deliveryMethodsForGroup(group, productById);
+      const delivery = selectedDelivery(group.key, available, deliveryChoice);
+      const payload: {
+        sellerId: string;
+        delivery: DeliveryMethod;
+        items: { productId: string; quantity: number }[];
+        pickupPoint?: PickupPoint;
+      } = {
+        sellerId: group.seller.id,
+        delivery: delivery!,
+        items: group.items.map((item) => ({
+          productId: item.productId,
+          quantity: item.quantity,
+        })),
+      };
 
-        if (group.delivery === "pickup") {
-          const points = pickupPointsFor(group.key);
-          const selected = points[pickupSelection[group.key] ?? -1];
-          if (selected) payload.pickupPoint = selected;
+      if (delivery === "pickup") {
+        const selected = pickupPointsFor(group, productById)[pickupSelection[group.key] ?? -1];
+        if (selected) payload.pickupPoint = selected;
+      }
+
+      if (delivery === "cdek") {
+        const office = cdekOffice[group.key];
+        if (office?.code) {
+          payload.pickupPoint = {
+            city: office.city,
+            address: office.street || office.label,
+            code: office.code,
+          };
         }
+      }
 
-        if (group.delivery === "cdek") {
-          const address = cdekAddress[group.key];
-          if (address?.city.trim() && address.address.trim()) {
-            payload.pickupPoint = {
-              city: address.city.trim(),
-              address: address.address.trim(),
-            };
-          }
-        }
-
-        return payload;
-      });
-
-    if (orderGroups.length === 0) {
-      toast.error("Нет товаров, доступных к заказу");
-      return;
-    }
+      return payload;
+    });
 
     setIsPaying(true);
     try {
-      const result = await createOrder({ groups: orderGroups, contact });
+      const result = await createOrder({ groups: orderGroups });
       clear();
       if (typeof result.paymentUrl === "string" && opensPaymentPage(result.paymentUrl)) {
         window.location.assign(result.paymentUrl);
@@ -132,110 +212,77 @@ export function CheckoutContent({ allProducts }: { allProducts: Product[] }) {
     }
   }
 
-  function opensPaymentPage(url: string): boolean {
-  if (url === "https://yoomoney.ru/checkout/demo") return false;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === "https:") return true;
-    return (
-      parsed.protocol === "http:" &&
-      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function pickupPointsFor(groupKey: string): PickupPoint[] {
-    const group = groups.find((item) => item.key === groupKey);
-    if (!group) return [];
-    const pickupPoints = new Map<string, PickupPoint>();
-    for (const item of group.items) {
-      const product = productById.get(item.productId);
-      if (!product?.pickupPoints) continue;
-      for (const point of product.pickupPoints) {
-        pickupPoints.set(`${point.city}__${point.address}`, point);
-      }
-    }
-    return Array.from(pickupPoints.values());
-  }
+  const itemCount = orderableGroups.reduce(
+    (sum, group) => sum + group.items.reduce((inner, item) => inner + item.quantity, 0),
+    0
+  );
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Контактные данные */}
-      <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
-        <h2 className="font-semibold">Контактные данные</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field
-            label="Имя и фамилия"
-            value={contact.name}
-            onChange={(v) => setContact((c) => ({ ...c, name: v }))}
-            placeholder="Иван Петров"
-          />
-          <Field
-            label="Телефон"
-            value={contact.phone}
-            onChange={(v) => setContact((c) => ({ ...c, phone: v }))}
-            placeholder="+7 999 123-45-67"
-            type="tel"
-          />
-          <Field
-            label="Email"
-            value={contact.email}
-            onChange={(v) => setContact((c) => ({ ...c, email: v }))}
-            placeholder="you@example.com"
-            type="email"
-            className="sm:col-span-2"
-          />
-        </div>
-      </section>
-
-      {/* Группы заказов */}
-      {groups.map((group) => {
-        if (group.items.length === 0) return null;
-
-        const groupTotal = group.items.reduce((sum, item) => {
-          const p = productById.get(item.productId);
-          return sum + (p ? p.price * item.quantity : 0);
-        }, 0);
-
-        // Все точки самовывоза в группе (у разных товаров могут быть разные)
-        const pickupPoints = new Map<string, PickupPoint>();
-        for (const item of group.items) {
-          const p = productById.get(item.productId);
-          if (p?.pickupPoints) {
-            for (const point of p.pickupPoints) {
-              pickupPoints.set(`${point.city}__${point.address}`, point);
-            }
-          }
-        }
-        const pointsList = Array.from(pickupPoints.values());
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row lg:gap-6">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pb-40 lg:pb-1 lg:pr-1">
+      {orderableGroups.map((group) => {
+        const available = deliveryMethodsForGroup(group, productById);
+        const delivery = selectedDelivery(group.key, available, deliveryChoice);
+        const pointsList = pickupPointsFor(group, productById);
+        const office = cdekOffice[group.key];
+        const quote = matchingQuote(group, productById, deliveryChoice, cdekOffice, cdekQuotes);
 
         return (
           <section key={group.key} className="bg-card flex flex-col gap-4 rounded-xl border p-4">
-            <div className="flex items-center justify-between gap-3 border-b pb-3">
-              <div className="font-medium">{group.seller.displayName}</div>
-              <div className="text-muted-foreground flex items-center gap-1 text-xs">
-                {group.delivery === "pickup" ? (
-                  <MapPin className="h-3 w-3" />
-                ) : (
-                  <Truck className="h-3 w-3" />
-                )}
-                {DELIVERY_LABELS[group.delivery]}
-              </div>
+            <div className="border-b pb-3 font-medium">{group.seller.displayName}</div>
+
+            <div className="flex flex-col gap-2">
+              <div className="text-sm font-medium">Способ доставки</div>
+              {available.length === 0 ? (
+                <p className="text-destructive text-sm">
+                  У товаров этого продавца нет общего способа доставки. Уберите часть позиций из
+                  корзины.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2" role="group" aria-label="Способ доставки">
+                  {available.map((method) => {
+                    const isActive = delivery === method;
+                    const blocked = method === "cdek" && !cdekAllowed;
+                    const Icon = method === "pickup" ? MapPin : Truck;
+                    return (
+                      <button
+                        key={method}
+                        type="button"
+                        disabled={blocked}
+                        onClick={() => {
+                          if (blocked) return;
+                          setDeliveryChoice((prev) => ({ ...prev, [group.key]: method }));
+                        }}
+                        className={cn(
+                          "flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm transition-colors",
+                          blocked && "cursor-not-allowed opacity-50",
+                          isActive
+                            ? "border-primary bg-primary/5 text-foreground"
+                            : "text-muted-foreground hover:bg-muted",
+                          blocked && "hover:bg-transparent"
+                        )}
+                      >
+                        <Icon className="h-4 w-4" />
+                        {DELIVERY_LABELS[method]}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {available.includes("cdek") && !cdekAllowed && (
+                <p className="text-sm text-orange-600">{CDEK_PHONE_HINT}</p>
+              )}
             </div>
 
-            {/* Выбор точки самовывоза */}
-            {group.delivery === "pickup" && pointsList.length > 0 && (
+            {delivery === "pickup" && pointsList.length > 0 && (
               <div className="flex flex-col gap-2">
                 <div className="text-sm font-medium">Выберите точку самовывоза</div>
                 <div className="flex flex-col gap-2">
-                  {pointsList.map((point, idx) => {
-                    const key = `${point.city}__${point.address}`;
-                    const isSelected = pickupSelection[group.key] === idx;
+                  {pointsList.map((point, index) => {
+                    const isSelected = pickupSelection[group.key] === index;
                     return (
                       <label
-                        key={key}
+                        key={`${point.city}__${point.address}`}
                         className={cn(
                           "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
                           isSelected ? "border-primary bg-primary/5" : "hover:bg-muted"
@@ -246,10 +293,7 @@ function pickupPointsFor(groupKey: string): PickupPoint[] {
                           name={`pickup-${group.key}`}
                           checked={isSelected}
                           onChange={() =>
-                            setPickupSelection((prev) => ({
-                              ...prev,
-                              [group.key]: idx,
-                            }))
+                            setPickupSelection((prev) => ({ ...prev, [group.key]: index }))
                           }
                           className="mt-1"
                         />
@@ -264,44 +308,31 @@ function pickupPointsFor(groupKey: string): PickupPoint[] {
               </div>
             )}
 
-            {/* Адрес для СДЭК */}
-            {group.delivery === "cdek" && (
+            {delivery === "cdek" && cdekAllowed && (
               <div className="flex flex-col gap-2">
-                <div className="text-sm font-medium">Адрес доставки</div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <Field
-                    label="Город"
-                    value={cdekAddress[group.key]?.city ?? ""}
-                    onChange={(v) =>
-                      setCdekAddress((prev) => ({
-                        ...prev,
-                        [group.key]: {
-                          city: v,
-                          address: prev[group.key]?.address ?? "",
-                        },
-                      }))
-                    }
-                    placeholder="Москва"
-                  />
-                  <Field
-                    label="Улица, дом, квартира"
-                    value={cdekAddress[group.key]?.address ?? ""}
-                    onChange={(v) =>
-                      setCdekAddress((prev) => ({
-                        ...prev,
-                        [group.key]: {
-                          city: prev[group.key]?.city ?? "",
-                          address: v,
-                        },
-                      }))
-                    }
-                    placeholder="ул. Ленина, д. 5, кв. 12"
-                  />
-                </div>
+                <div className="text-sm font-medium">Пункт выдачи СДЭК</div>
+                <button
+                  type="button"
+                  onClick={() => rememberCdekWidgetGroup(group.key)}
+                  className="border-primary text-primary hover:bg-primary/5 self-start rounded-lg border px-4 py-2.5 text-sm font-medium"
+                >
+                  Выбрать пункт СДЭК
+                </button>
+                {office ? (
+                  <p className="text-sm">{office.label}</p>
+                ) : (
+                  <p className="text-muted-foreground text-sm">Пункт выдачи не выбран</p>
+                )}
+                {quote?.loading && (
+                  <p className="text-muted-foreground text-sm">Считаем стоимость доставки…</p>
+                )}
+                {typeof quote?.price === "number" && (
+                  <p className="text-sm font-medium">Доставка: {formatPrice(quote.price)}</p>
+                )}
+                {quote?.error && <p className="text-destructive text-sm">{quote.error}</p>}
               </div>
             )}
 
-            {/* Состав заказа */}
             <div>
               <div className="mb-2 text-sm font-medium">Товары</div>
               <ul className="divide-y">
@@ -310,7 +341,7 @@ function pickupPointsFor(groupKey: string): PickupPoint[] {
                   if (!product) return null;
                   return (
                     <li
-                      key={`${item.productId}__${item.delivery}`}
+                      key={item.productId}
                       className="flex items-center justify-between gap-3 py-2 text-sm"
                     >
                       <span className="truncate">
@@ -325,80 +356,179 @@ function pickupPointsFor(groupKey: string): PickupPoint[] {
                 })}
               </ul>
             </div>
-
-            <div className="flex items-center justify-between border-t pt-3">
-              <span className="text-muted-foreground text-sm">Итого у продавца</span>
-              <span className="font-bold">{formatPrice(groupTotal)}</span>
-            </div>
           </section>
         );
       })}
+      </div>
 
-      {/* Итого + оплата */}
-      <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
-        <div className="flex items-center justify-between">
-          <span className="text-muted-foreground text-sm">
-            Итого к оплате ({items.reduce((s, i) => s + i.quantity, 0)}{" "}
-            {pluralize(
-              items.reduce((s, i) => s + i.quantity, 0),
-              ["товар", "товара", "товаров"]
-            )}
-            )
-          </span>
-          <span className="text-2xl font-bold">{formatPrice(total)}</span>
-        </div>
-
-        {!canPay && !isPaying && (
-          <div className="text-muted-foreground text-xs">
-            Заполните контактные данные
-            {groups.some((g) => g.items.length > 0) &&
-              " и выберите способ получения для каждой группы"}
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={handlePay}
-          disabled={!canPay}
-          className={cn(
-            "rounded-lg px-6 py-3 text-sm font-medium transition-colors",
-            canPay
-              ? "bg-primary text-primary-foreground hover:bg-primary/90"
-              : "bg-muted text-muted-foreground cursor-not-allowed"
+      <aside className="bg-background fixed inset-x-0 bottom-0 z-30 border-t p-4 lg:static lg:z-auto lg:w-80 lg:shrink-0 lg:self-start lg:border-0 lg:bg-transparent lg:p-0">
+        <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
+          {deliveryTotal > 0 && (
+            <div className="text-muted-foreground flex items-center justify-between gap-3 text-sm">
+              <span>Доставка</span>
+              <span>{formatPrice(deliveryTotal)}</span>
+            </div>
           )}
-        >
-          {isPaying ? "Обработка..." : `Оплатить ${formatPrice(total)}`}
-        </button>
-      </section>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-muted-foreground text-sm">
+              Итого к оплате ({itemCount} {pluralize(itemCount, ["товар", "товара", "товаров"])})
+            </span>
+            <span className="text-2xl font-bold">{formatPrice(total)}</span>
+          </div>
+
+          {!canPay && !isPaying && (
+            <div className={cn("text-xs", !cdekAllowed ? "text-orange-600" : "text-muted-foreground")}>
+              {!cdekAllowed &&
+              orderableGroups.some((group) =>
+                deliveryMethodsForGroup(group, productById).includes("cdek")
+              )
+                ? CDEK_PHONE_HINT
+                : cdekPending
+                  ? "Выберите пункт СДЭК и дождитесь стоимости доставки"
+                  : "Выберите способ доставки для каждого продавца"}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handlePay}
+            disabled={!canPay}
+            className={cn(
+              "rounded-lg px-6 py-3 text-sm font-medium transition-colors",
+              canPay
+                ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                : "bg-muted text-muted-foreground cursor-not-allowed"
+            )}
+          >
+            {isPaying ? "Обработка..." : `Оплатить ${formatPrice(total)}`}
+          </button>
+        </section>
+      </aside>
+
+      <CdekWidget
+        open={cdekWidgetGroup !== null}
+        sender={false}
+        onOpenChange={(open) => {
+          if (!open) rememberCdekWidgetGroup(null);
+        }}
+        onSelect={handleCdekSelect}
+      />
     </div>
   );
 }
 
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  type = "text",
-  className,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
-  className?: string;
-}) {
-  return (
-    <label className={cn("flex flex-col gap-1", className)}>
-      <span className="text-muted-foreground text-xs">{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="bg-background focus:ring-primary/30 rounded-md border px-3 py-2 text-sm outline-none focus:ring-2"
-      />
-    </label>
-  );
+interface CdekQuoteTarget {
+  groupKey: string;
+  sellerId: string;
+  code: string;
+  itemCount: number;
+  signature: string;
+}
+
+function cdekQuoteTargets(
+  groups: CartGroup[],
+  productById: Map<string, Product>,
+  deliveryChoice: Record<string, DeliveryMethod>,
+  cdekOffice: Record<string, CdekOffice>
+): CdekQuoteTarget[] {
+  const targets: CdekQuoteTarget[] = [];
+  for (const group of groups) {
+    const available = deliveryMethodsForGroup(group, productById);
+    const delivery = selectedDelivery(group.key, available, deliveryChoice);
+    const office = cdekOffice[group.key];
+    if (delivery !== "cdek" || !office?.code) continue;
+    const itemCount = group.items.reduce((sum, item) => sum + item.quantity, 0);
+    if (itemCount < 1) continue;
+    targets.push({
+      groupKey: group.key,
+      sellerId: group.seller.id,
+      code: office.code,
+      itemCount,
+      signature: `${group.seller.id}|${office.code}|${itemCount}|${office.selectedAt}`,
+    });
+  }
+  return targets;
+}
+
+function matchingQuote(
+  group: CartGroup,
+  productById: Map<string, Product>,
+  deliveryChoice: Record<string, DeliveryMethod>,
+  cdekOffice: Record<string, CdekOffice>,
+  cdekQuotes: Record<string, CdekQuoteState>
+): CdekQuoteState | undefined {
+  const target = cdekQuoteTargets([group], productById, deliveryChoice, cdekOffice)[0];
+  if (!target) return undefined;
+  const quote = cdekQuotes[group.key];
+  if (!quote || quote.signature !== target.signature) return undefined;
+  return quote;
+}
+
+function readyCdekPrice(
+  group: CartGroup,
+  productById: Map<string, Product>,
+  deliveryChoice: Record<string, DeliveryMethod>,
+  cdekOffice: Record<string, CdekOffice>,
+  cdekQuotes: Record<string, CdekQuoteState>
+): number | undefined {
+  const quote = matchingQuote(group, productById, deliveryChoice, cdekOffice, cdekQuotes);
+  return typeof quote?.price === "number" ? quote.price : undefined;
+}
+
+function selectedDelivery(
+  groupKey: string,
+  available: DeliveryMethod[],
+  choice: Record<string, DeliveryMethod>
+): DeliveryMethod | undefined {
+  const chosen = choice[groupKey];
+  if (chosen && available.includes(chosen)) return chosen;
+  return available[0];
+}
+
+function isGroupReady(
+  group: CartGroup,
+  productById: Map<string, Product>,
+  deliveryChoice: Record<string, DeliveryMethod>,
+  pickupSelection: Record<string, number>,
+  cdekOffice: Record<string, CdekOffice>,
+  cdekQuotes: Record<string, CdekQuoteState>,
+  cdekAllowed: boolean
+): boolean {
+  const available = deliveryMethodsForGroup(group, productById);
+  const delivery = selectedDelivery(group.key, available, deliveryChoice);
+  if (!delivery) return false;
+  if (delivery === "cdek" && !cdekAllowed) return false;
+
+  if (delivery === "pickup") {
+    const points = pickupPointsFor(group, productById);
+    return points.length > 0 && pickupSelection[group.key] !== undefined;
+  }
+
+  return readyCdekPrice(group, productById, deliveryChoice, cdekOffice, cdekQuotes) !== undefined;
+}
+
+function pickupPointsFor(group: CartGroup, productById: Map<string, Product>): PickupPoint[] {
+  const pickupPoints = new Map<string, PickupPoint>();
+  for (const item of group.items) {
+    const product = productById.get(item.productId);
+    if (!product?.pickupPoints) continue;
+    for (const point of product.pickupPoints) {
+      pickupPoints.set(`${point.city}__${point.address}`, point);
+    }
+  }
+  return Array.from(pickupPoints.values());
+}
+
+function opensPaymentPage(url: string): boolean {
+  if (url === "https://yoomoney.ru/checkout/demo") return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:") return true;
+    return (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+    );
+  } catch {
+    return false;
+  }
 }

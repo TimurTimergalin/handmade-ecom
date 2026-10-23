@@ -5,11 +5,10 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
+from common.db import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from common.db import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 def _enum_str_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -21,7 +20,9 @@ class OrderStatus(enum.StrEnum):
     PAID = "paid"
     ASSEMBLING = "assembling"
     SHIPPED = "shipped"
+    DELIVERING = "delivering"
     DELIVERED = "delivered"
+    COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 
@@ -34,10 +35,12 @@ class DeliveryMethod(enum.StrEnum):
 
 STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CREATED: {OrderStatus.PAID, OrderStatus.CANCELLED},
-    OrderStatus.PAID: {OrderStatus.ASSEMBLING, OrderStatus.SHIPPED, OrderStatus.CANCELLED},
-    OrderStatus.ASSEMBLING: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
-    OrderStatus.SHIPPED: {OrderStatus.DELIVERED},
-    OrderStatus.DELIVERED: set(),
+    OrderStatus.PAID: {OrderStatus.ASSEMBLING, OrderStatus.SHIPPED, OrderStatus.DELIVERING, OrderStatus.DELIVERED, OrderStatus.CANCELLED},
+    OrderStatus.ASSEMBLING: {OrderStatus.SHIPPED, OrderStatus.DELIVERING, OrderStatus.DELIVERED, OrderStatus.CANCELLED},
+    OrderStatus.SHIPPED: {OrderStatus.DELIVERING, OrderStatus.DELIVERED, OrderStatus.COMPLETED, OrderStatus.CANCELLED},
+    OrderStatus.DELIVERING: {OrderStatus.DELIVERED, OrderStatus.COMPLETED},
+    OrderStatus.DELIVERED: {OrderStatus.COMPLETED, OrderStatus.CANCELLED},
+    OrderStatus.COMPLETED: set(),
     OrderStatus.CANCELLED: set(),
 }
 
@@ -56,6 +59,15 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         default=OrderStatus.CREATED,
         index=True,
+    )
+    status_override: Mapped[OrderStatus | None] = mapped_column(
+        Enum(
+            OrderStatus,
+            name="order_status_override",
+            native_enum=False,
+            values_callable=_enum_str_values,
+        ),
+        default=None,
     )
     idempotency_key: Mapped[str | None] = mapped_column(String(80), unique=True, default=None)
 
@@ -83,9 +95,13 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     external_order_id: Mapped[str | None] = mapped_column(String(36), unique=True, default=None)
     payment_url: Mapped[str | None] = mapped_column(Text, default=None)
+    multi_order_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
     receival_code: Mapped[str | None] = mapped_column(String(6), default=None)
     tracking_number: Mapped[str | None] = mapped_column(String(120), default=None)
+    cdek_office_code: Mapped[str | None] = mapped_column(String(64), default=None)
+    cdek_order_uuid: Mapped[str | None] = mapped_column(String(64), default=None)
     payout_token: Mapped[str | None] = mapped_column(String(512), default=None)
+    yookassa_account_id: Mapped[str | None] = mapped_column(String(128), default=None)
 
     items: Mapped[list[OrderItem]] = relationship(
         back_populates="order",

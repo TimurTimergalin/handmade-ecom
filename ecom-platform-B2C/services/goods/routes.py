@@ -13,7 +13,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from common.app import NotFoundError
+from common.app import ConflictError, NotFoundError
 from common.db import Database
 from models import Category, Offer, Product
 
@@ -84,7 +84,8 @@ class ProductOut(ORMModel):
     created_at: datetime
     sale_mode: str = "online"
     available_deliveries: list[str] = Field(default_factory=list)
-    pickup_points: list[dict[str, str]] | None = None
+    pickup_points: list[dict[str, str | int]] | None = None
+    cdek_ship_days: list[int] = Field(default_factory=list)
     deal_contacts: str | None = None
     offers: list[OfferOut] = Field(default_factory=list)
     category: CategoryOut | None = None
@@ -250,6 +251,8 @@ async def upsert_from_event(session: AsyncSession, payload: dict) -> Product:
         product.available_deliveries = payload["available_deliveries"]
     if "pickup_points" in payload:
         product.pickup_points = payload["pickup_points"]
+    if "cdek_ship_days" in payload and isinstance(payload["cdek_ship_days"], list):
+        product.cdek_ship_days = payload["cdek_ship_days"]
     if "deal_contacts" in payload:
         product.deal_contacts = payload["deal_contacts"]
     if payload.get("category_id"):
@@ -327,6 +330,32 @@ async def resolve_offer(offer_id: uuid.UUID, session: SessionDep) -> OfferResolv
     if product is None:
         raise NotFoundError(f"Product for offer {offer_id} not found")
     return OfferResolved.model_validate({"offer": offer, "product": product}, from_attributes=True)
+
+
+class StockAdjust(BaseModel):
+    delta: int = Field(ge=-1_000_000, le=1_000_000)
+
+
+@router.post("/internal/goods/{product_id}/stock", tags=["goods"])
+async def adjust_goods_stock(
+    product_id: uuid.UUID, payload: StockAdjust, session: SessionDep
+) -> dict[str, int]:
+    if payload.delta == 0:
+        raise ConflictError("Изменение остатка не может быть нулевым")
+    product = await get_product(session, product_id)
+    if product is None:
+        raise NotFoundError(f"Product {product_id} not found")
+    await _load_offers(session, product)
+    offer = next((item for item in product.offers if item.is_default), None)
+    if offer is None and product.offers:
+        offer = product.offers[0]
+    if offer is None:
+        raise NotFoundError(f"Product {product_id} not found")
+    if offer.stock + payload.delta < 0:
+        raise ConflictError("Недостаточно на складе")
+    offer.stock += payload.delta
+    await session.flush()
+    return {"stock": offer.stock}
 
 
 @router.get("/goods/{product_id}", response_model=ProductOut, tags=["goods"])

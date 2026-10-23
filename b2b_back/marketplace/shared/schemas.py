@@ -19,6 +19,7 @@ T = TypeVar("T")
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Money = Annotated[int, Field(strict=True, ge=0, le=2_147_483_647)]
 Stock = Annotated[int, Field(strict=True, ge=0, le=2_147_483_647)]
+MaxDays = Annotated[int, Field(strict=True, ge=0, le=365)]
 
 
 class APIError(DTO):
@@ -65,13 +66,24 @@ class OrderStatus(StrEnum):
     CREATED = "created"
     PAID = "paid"
     SHIPPED = "shipped"
+    DELIVERING = "delivering"
     DELIVERED = "delivered"
+    COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 
 class PickupPoint(DTO):
+    """Пункт самовывоза при чтении. У старых записей maxDays может отсутствовать."""
+
     city: Text
     address: Text
+    max_days: MaxDays | None = None
+
+
+class PickupPointInput(PickupPoint):
+    """Пункт самовывоза при записи. Срок доставки обязателен."""
+
+    max_days: MaxDays
 
 
 class Identity(DTO):
@@ -97,6 +109,8 @@ class Entitlements(DTO):
     product_limit: int | None
     post_limit: int | None
     online_payments: bool = False
+    valid_until: datetime | None = None
+    auto_renew: bool = False
 
 
 class TimestampDTO(DTO):

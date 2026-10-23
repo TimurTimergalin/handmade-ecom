@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marketplace.publications.schemas.posts import PostCreate, PostPatch, PostRead
+from marketplace.goods.schemas.products import RejectReason
 from marketplace.publications.services.posts import PostsService
 from marketplace.shared.db import session
 from marketplace.shared.schemas import Envelope, Page, PostStatus
@@ -79,6 +80,28 @@ async def read_published(
 @router.get("/internal/posts/{post_id}", response_model=Envelope[PostRead])
 async def read_one(post_id: UUID, svc: Service):
     return {"data": await svc.read_one(post_id)}
+
+
+@router.post(
+    "/internal/sellers/{seller_id}/posts/{post_id}/revert", response_model=Envelope[PostRead]
+)
+async def revert(seller_id: UUID, post_id: UUID, svc: Service):
+    return {"data": await svc.discard_draft(seller_id, post_id)}
+
+
+@router.get("/internal/moderation/posts", response_model=Envelope[list[dict]])
+async def pending_posts(svc: Service):
+    return {"data": await svc.pending_moderation()}
+
+
+@router.post("/internal/moderation/posts/{post_id}/accept", response_model=Envelope[dict])
+async def accept_post(post_id: UUID, svc: Service):
+    return {"data": await svc.accept_moderation(post_id)}
+
+
+@router.post("/internal/moderation/posts/{post_id}/reject", response_model=Envelope[dict])
+async def reject_post(post_id: UUID, payload: RejectReason, svc: Service):
+    return {"data": await svc.reject_moderation(post_id, payload.reason)}
 
 
 @router.get("/internal/sellers/{seller_id}/media/references", response_model=Envelope[list[str]])

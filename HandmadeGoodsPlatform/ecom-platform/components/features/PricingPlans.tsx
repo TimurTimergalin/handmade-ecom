@@ -4,10 +4,21 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Check, X } from "lucide-react";
 
-import { getSellerSubscription, subscribePremium, syncSubscription } from "@/services/api";
+import {
+  getSellerProfile,
+  getSellerSubscription,
+  setAutoRenew,
+  subscribePremium,
+  syncSubscription,
+} from "@/services/api";
 import { cn } from "@/lib/utils";
 import { formatPrice } from "@/lib/utils";
 import type { PlanTier } from "@/types";
+
+function formatUntil(value: string | null) {
+  if (!value) return "конца оплаченного периода";
+  return new Date(value).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+}
 
 const FEATURES = [
   { label: "Товары", free: "до 10", premium: "без лимита" },
@@ -20,15 +31,27 @@ const FEATURES = [
 
 export function PricingPlans({ currentTier: initialTier = "free" }: { currentTier?: PlanTier }) {
   const [currentTier, setCurrentTier] = useState<PlanTier>(initialTier);
+  const [autoRenew, setAutoRenewState] = useState(false);
+  const [validUntil, setValidUntil] = useState<string | null>(null);
+  const [shopId, setShopId] = useState("");
+  const [shopLoaded, setShopLoaded] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
+  const [isChangingRenewal, setIsChangingRenewal] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    getSellerSubscription()
-      .then((subscription) => {
-        if (!cancelled) setCurrentTier(subscription.tier === "premium" ? "premium" : "free");
+    Promise.all([getSellerSubscription(), getSellerProfile().catch(() => null)])
+      .then(([subscription, profile]) => {
+        if (cancelled) return;
+        setCurrentTier(subscription.tier === "premium" ? "premium" : "free");
+        setAutoRenewState(Boolean(subscription.autoRenew));
+        setValidUntil(subscription.validUntil);
+        setShopId((profile?.yookassaShopId ?? "").trim());
+        setShopLoaded(true);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) setShopLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -45,6 +68,8 @@ export function PricingPlans({ currentTier: initialTier = "free" }: { currentTie
           if (cancelled) return;
           if (result.status === "confirmed" || result.tier === "premium") {
             setCurrentTier("premium");
+            setAutoRenewState(true);
+            if (result.validUntil) setValidUntil(result.validUntil);
             toast.success("Premium активирован");
             window.history.replaceState(null, "", "/seller/pricing");
             return;
@@ -64,7 +89,26 @@ export function PricingPlans({ currentTier: initialTier = "free" }: { currentTie
     };
   }, []);
 
+  async function disableRenewal() {
+    setIsChangingRenewal(true);
+    try {
+      const saved = await setAutoRenew(false);
+      setAutoRenewState(saved.autoRenew);
+      setValidUntil(saved.validUntil);
+      toast.success("Автопродление отключено");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось отключить автопродление");
+    } finally {
+      setIsChangingRenewal(false);
+    }
+  }
+
   async function handleSubscribe() {
+    if (!shopLoaded) return;
+    if (!shopId.trim()) {
+      toast.error("Чтобы оформить Premium, подключите магазин ЮKassa в профиле");
+      return;
+    }
     setIsPaying(true);
     try {
       const payment = await subscribePremium();
@@ -148,7 +192,7 @@ export function PricingPlans({ currentTier: initialTier = "free" }: { currentTie
               {formatPrice(990)}
               <span className="text-muted-foreground text-sm font-normal">/мес</span>
             </div>
-            <div className="text-muted-foreground text-xs">отмена в любой момент</div>
+            <div className="text-muted-foreground text-xs">автопродление можно отключить</div>
           </div>
 
           <ul className="flex flex-col gap-2 text-sm">
@@ -160,6 +204,32 @@ export function PricingPlans({ currentTier: initialTier = "free" }: { currentTie
               </li>
             ))}
           </ul>
+
+          {currentTier === "premium" && (
+            <div className="flex flex-col gap-2">
+              <p className="text-muted-foreground text-xs">
+                {autoRenew
+                  ? `Следующее списание ${formatUntil(validUntil)}. Карта сохранена в ЮKassa.`
+                  : `Автопродление отключено. Premium действует до ${formatUntil(validUntil)}.`}
+              </p>
+              {autoRenew && (
+                <button
+                  type="button"
+                  onClick={() => void disableRenewal()}
+                  disabled={isChangingRenewal}
+                  className="hover:bg-muted w-fit rounded-lg border px-4 py-2 text-sm font-medium disabled:opacity-60"
+                >
+                  {isChangingRenewal ? "Сохраняем..." : "Отключить автопродление"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {currentTier !== "premium" && shopLoaded && !shopId.trim() && (
+            <p className="text-muted-foreground text-xs">
+              Сначала подключите магазин ЮKassa в профиле.
+            </p>
+          )}
 
           <button
             type="button"

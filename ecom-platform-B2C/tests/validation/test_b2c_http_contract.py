@@ -22,6 +22,9 @@ async def test_contract_login_response_envelope(client: AsyncClient) -> None:
     respx.post("http://users:8000/api/v1/auth/login").mock(
         return_value=Response(200, json={"user": MOCK_USER})
     )
+    respx.post("http://users:8000/api/v1/auth/sessions").mock(
+        return_value=Response(200, json={"refreshToken": "refresh-1"})
+    )
     response = await client.post(
         "/api/auth/login",
         json={"email": "buyer1@example.com", "password": "secret123"},

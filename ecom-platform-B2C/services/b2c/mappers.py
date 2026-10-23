@@ -26,16 +26,52 @@ def seller_from_upstream(raw: dict, *, is_following: bool = False) -> dict:
         productsCount=int(raw.get("productsCount") or raw.get("products_count") or 0),
         postsCount=int(raw.get("postsCount") or raw.get("posts_count") or 0),
         joinedAt=raw.get("joinedAt") or raw.get("created_at") or datetime.now(),
+        legalType=(
+            raw.get("legalType") or raw.get("legal_type")
+            if (raw.get("legalType") or raw.get("legal_type")) in {"person", "company"}
+            else None
+        ),
+        lastName=raw.get("lastName") or raw.get("last_name"),
+        firstName=raw.get("firstName") or raw.get("first_name"),
+        patronymic=raw.get("patronymic"),
+        legalName=raw.get("legalName") or raw.get("legal_name"),
+        inn=raw.get("inn"),
+        ogrn=raw.get("ogrn"),
+        legalAddress=raw.get("legalAddress") or raw.get("legal_address"),
     )
     return dto_json(dto)
 
 
+def _public_images(raw: dict) -> list[str]:
+    urls: list[str] = []
+    for item in raw.get("images") or []:
+        if isinstance(item, str):
+            url = item.strip()
+        elif isinstance(item, dict):
+            url = str(item.get("url") or item.get("src") or "").strip()
+        else:
+            continue
+        if url:
+            urls.append(url)
+    if not urls:
+        fallback = raw.get("image") or ""
+        if isinstance(fallback, str) and fallback.strip():
+            urls.append(fallback.strip())
+    return urls
+
+
+def _ship_days(raw: dict) -> list[int]:
+    value = raw.get("cdek_ship_days")
+    if not isinstance(value, list):
+        value = raw.get("cdekShipDays")
+    if not isinstance(value, list):
+        return []
+    return [day for day in value if type(day) is int and 0 <= day <= 6]
+
+
 def product_from_upstream(raw: dict, seller: dict) -> dict:
-    images = raw.get("images") or []
-    image = ""
-    if images:
-        first = images[0]
-        image = first.get("url") if isinstance(first, dict) else str(first)
+    images = _public_images(raw)
+    image = images[0] if images else ""
     offers = raw.get("offers") or []
     offer = next((o for o in offers if o.get("is_default")), offers[0] if offers else None)
     price = int(Decimal(str(offer.get("price_amount", 0)))) if offer else 0
@@ -46,12 +82,14 @@ def product_from_upstream(raw: dict, seller: dict) -> dict:
         title=raw.get("title", ""),
         description=raw.get("description"),
         image=image,
+        images=images,
         price=price,
         sellerId=str(raw.get("seller_id") or raw.get("master_id")),
         seller=seller_dto,
         saleMode=raw.get("sale_mode") or "online",
         availableDeliveries=raw.get("available_deliveries") or ["pickup", "cdek"],
         pickupPoints=raw.get("pickup_points"),
+        cdekShipDays=_ship_days(raw),
         dealContacts=raw.get("deal_contacts"),
         inStock=in_stock,
         createdAt=raw.get("created_at") or datetime.now(),

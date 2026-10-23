@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -35,3 +36,7 @@ class PostPatch(DTO):
 class PostRead(TimestampDTO, PostCreate):
     seller_id: UUID
     published_at: datetime | None = None
+    moderation_status: Literal["pending", "active", "rejected"] | None = None
+    draft_status: Literal["pending", "rejected"] | None = None
+    rejection_reason: str | None = None
+    draft: dict | None = None

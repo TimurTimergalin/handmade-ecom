@@ -18,6 +18,15 @@ class SellerPayload(DTO):
 class ProductPayload(DTO):
     product_id: UUID
     seller_id: UUID
+    cdek_ship_days: list[Annotated[int, Field(strict=True, ge=0, le=6)]] = Field(
+        default_factory=list, max_length=7
+    )
+
+    @model_validator(mode="after")
+    def unique_ship_days(self):
+        if len(set(self.cdek_ship_days)) != len(self.cdek_ship_days):
+            raise ValueError("Дни отгрузки СДЭК не должны повторяться")
+        return self
 
 
 class ProductUpdatedPayload(ProductPayload):
@@ -26,14 +35,16 @@ class ProductUpdatedPayload(ProductPayload):
             "title",
             "description",
             "image",
+            "images",
             "price",
             "saleMode",
             "availableDeliveries",
             "pickupPoints",
             "dealContacts",
             "inStock",
+            "cdekShipDays",
         ]
-    ] = Field(min_length=1, max_length=9)
+    ] = Field(min_length=1, max_length=11)
 
 
 class PublicationPayload(DTO):

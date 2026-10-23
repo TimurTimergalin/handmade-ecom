@@ -2,18 +2,23 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { toast } from "sonner";
-import { Plus, X } from "lucide-react";
+import { X } from "lucide-react";
 
-import { createProduct, getSellerSubscription, updateProduct, uploadImage } from "@/services/api";
+import { createProduct, getDeliverySettings, getSellerSubscription, revertProduct, updateProduct, uploadImage } from "@/services/api";
 import { ROUTES, DELIVERY_LABELS, SALE_MODE_LABELS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import type { DeliveryMethod, PickupPoint, Product, SaleMode } from "@/types";
 
+function pointKey(point: PickupPoint) {
+  return `${point.city.trim()}__${point.address.trim()}`;
+}
+
 interface FormState {
   title: string;
   description: string;
-  image: string;
+  images: string[];
   price: string;
   inStock: string;
   saleMode: SaleMode;
@@ -22,25 +27,39 @@ interface FormState {
   dealContacts: string;
 }
 
+function initialImages(product?: Product): string[] {
+  const listed = (product?.images ?? []).map((url) => url.trim()).filter(Boolean);
+  if (listed.length > 0) return listed;
+  const single = product?.image.trim();
+  return single ? [single] : [];
+}
+
+function formSource(product?: Product): Product | undefined {
+  if (!product?.draftStatus || !product.draft) return product;
+  return { ...product, ...product.draft };
+}
+
 export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
   const router = useRouter();
   const isEdit = !!initialProduct;
+  const source = formSource(initialProduct);
 
   const [form, setForm] = useState<FormState>(() => ({
-    title: initialProduct?.title ?? "",
-    description: initialProduct?.description ?? "",
-    image: initialProduct?.image ?? "",
-    price: initialProduct?.price.toString() ?? "",
-    inStock: initialProduct?.inStock.toString() ?? "0",
-    saleMode: initialProduct?.saleMode ?? "online",
-    availableDeliveries: initialProduct?.availableDeliveries ?? ["cdek"],
-    pickupPoints: initialProduct?.pickupPoints ?? [],
-    dealContacts: initialProduct?.dealContacts ?? "",
+    title: source?.title ?? "",
+    description: source?.description ?? "",
+    images: initialImages(source),
+    price: source?.price.toString() ?? "",
+    inStock: source?.inStock.toString() ?? "0",
+    saleMode: source?.saleMode === "deal_only" ? "deal_only" : "online",
+    availableDeliveries: source?.availableDeliveries ?? ["cdek"],
+    pickupPoints: source?.pickupPoints ?? [],
+    dealContacts: source?.dealContacts ?? "",
   }));
 
   const [isSaving, setIsSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [tier, setTier] = useState<string | null>(null);
+  const [shopPickupPoints, setShopPickupPoints] = useState<PickupPoint[]>([]);
   const onlineLocked = tier === "free" && initialProduct?.saleMode !== "online";
 
   useEffect(() => {
@@ -57,6 +76,22 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
       })
       .catch(() => {
         if (!cancelled) setTier(null);
+      });
+    getDeliverySettings()
+      .then((settings) => {
+        if (cancelled) return;
+        const points = settings.pickupEnabled ? (settings.pickupPoints ?? []) : [];
+        setShopPickupPoints(points);
+        setForm((current) => ({
+          ...current,
+          pickupPoints: current.pickupPoints.flatMap((item) => {
+            const match = points.find((point) => pointKey(point) === pointKey(item));
+            return match ? [match] : [];
+          }),
+        }));
+      })
+      .catch(() => {
+        if (!cancelled) setShopPickupPoints([]);
       });
     return () => {
       cancelled = true;
@@ -79,30 +114,26 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
     });
   }
 
-  function addPickupPoint() {
-    setForm((f) => ({
-      ...f,
-      pickupPoints: [...f.pickupPoints, { city: "", address: "" }],
-    }));
+  function toggleShopPoint(point: PickupPoint) {
+    setForm((current) => {
+      const key = pointKey(point);
+      const selected = current.pickupPoints.some((item) => pointKey(item) === key);
+      return {
+        ...current,
+        pickupPoints: selected
+          ? current.pickupPoints.filter((item) => pointKey(item) !== key)
+          : [...current.pickupPoints, point],
+      };
+    });
   }
 
-  function updatePickupPoint(idx: number, patch: Partial<PickupPoint>) {
-    setForm((f) => ({
-      ...f,
-      pickupPoints: f.pickupPoints.map((p, i) => (i === idx ? { ...p, ...patch } : p)),
-    }));
-  }
-
-  function removePickupPoint(idx: number) {
-    setForm((f) => ({
-      ...f,
-      pickupPoints: f.pickupPoints.filter((_, i) => i !== idx),
-    }));
+  function imageList(): string[] {
+    return form.images.map((url) => url.trim()).filter(Boolean);
   }
 
   function validate(): string | null {
     if (!form.title.trim()) return "Введите название";
-    if (!form.image.trim()) return "Укажите URL картинки";
+    if (imageList().length < 2) return "Добавьте минимум две картинки";
     const price = Number(form.price);
     if (!Number.isInteger(price) || price <= 0) return "Цена должна быть целым числом рублей";
     const stock = Number(form.inStock);
@@ -110,16 +141,11 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
     if (onlineLocked && form.saleMode === "online") {
       return "На тарифе Free доступны только продажи по договорённости";
     }
-    if (form.saleMode === "online" && stock <= 0) return "Для продажи онлайн укажите остаток";
     if (form.availableDeliveries.length === 0) return "Выберите хотя бы один способ доставки";
     if (form.availableDeliveries.includes("pickup") && form.pickupPoints.length === 0) {
-      return "Добавьте адрес самовывоза";
-    }
-    if (
-      form.availableDeliveries.includes("pickup") &&
-      form.pickupPoints.some((p) => !p.city.trim() || !p.address.trim())
-    ) {
-      return "Заполните все адреса самовывоза";
+      return shopPickupPoints.length === 0
+        ? "Сначала добавьте пункты самовывоза в разделе «Доставка»"
+        : "Выберите пункт самовывоза";
     }
     if (form.saleMode === "deal_only" && !form.dealContacts.trim()) {
       return "Укажите контакты для сделки";
@@ -136,10 +162,19 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
 
     setIsSaving(true);
 
+    const images = imageList();
+    const image = images[0];
+    if (!image) {
+      toast.error("Добавьте минимум две картинки");
+      setIsSaving(false);
+      return;
+    }
+
     const payload = {
       title: form.title.trim(),
       description: form.description.trim(),
-      image: form.image.trim(),
+      image,
+      images,
       price: Number(form.price),
       inStock: Number(form.inStock),
       saleMode: form.saleMode,
@@ -148,6 +183,7 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
         ? form.pickupPoints.map((point) => ({
             city: point.city.trim(),
             address: point.address.trim(),
+            maxDays: point.maxDays as number,
           }))
         : [],
       dealContacts: form.dealContacts.trim(),
@@ -156,10 +192,21 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
     try {
       if (isEdit && initialProduct) {
         await updateProduct(initialProduct.id, payload);
-        toast.success("Товар обновлён");
+        const contentChanged =
+          payload.title !== (source?.title ?? "").trim() ||
+          payload.description !== (source?.description ?? "").trim() ||
+          payload.price !== source?.price ||
+          payload.images.join("\n") !== initialImages(source).join("\n");
+        toast.success(
+          initialProduct.moderationStatus === "active" && !contentChanged
+            ? "Товар обновлён"
+            : initialProduct.moderationStatus === "active"
+              ? "Изменения товара отправлены на модерацию"
+              : "Товар отправлен на модерацию"
+        );
       } else {
         await createProduct(payload);
-        toast.success("Товар создан");
+        toast.success("Товар отправлен на модерацию");
       }
       router.push(ROUTES.seller.products);
     } catch (error) {
@@ -168,21 +215,77 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
     }
   }
 
-  async function handleImageFile(file: File | undefined) {
-    if (!file) return;
+  async function handleImageFiles(files: File[]) {
+    if (files.length === 0) return;
     setIsUploading(true);
+    const uploaded: string[] = [];
     try {
-      const url = await uploadImage(file);
-      update("image", url);
+      for (const file of files) {
+        uploaded.push(await uploadImage(file));
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось загрузить изображение");
     } finally {
+      if (uploaded.length > 0) {
+        setForm((current) => ({ ...current, images: [...current.images, ...uploaded] }));
+      }
       setIsUploading(false);
+    }
+  }
+
+  function removeImage(index: number) {
+    setForm((current) => ({
+      ...current,
+      images: current.images.filter((_, imageIndex) => imageIndex !== index),
+    }));
+  }
+
+  async function rollbackDraft() {
+    if (!initialProduct) return;
+    setIsSaving(true);
+    try {
+      await revertProduct(initialProduct.id);
+      toast.success("Изменения отменены");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось откатить изменения");
+    } finally {
+      setIsSaving(false);
     }
   }
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
+      {initialProduct?.moderationStatus === "pending" && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Товар на модерации и пока не показан на витрине.
+        </div>
+      )}
+      {initialProduct?.moderationStatus === "rejected" && (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          Заявка отклонена{initialProduct.rejectionReason ? `: ${initialProduct.rejectionReason}` : ""}.
+          Исправьте товар и отправьте снова.
+        </div>
+      )}
+      {initialProduct?.draftStatus === "pending" && (
+        <div className="flex flex-col gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          <p>Изменения на модерации. На витрине пока прежние данные.</p>
+          <button
+            type="button"
+            onClick={() => void rollbackDraft()}
+            disabled={isSaving}
+            className="w-fit rounded-md border border-amber-800 px-3 py-1 text-xs font-medium disabled:opacity-60"
+          >
+            Откатить изменения
+          </button>
+        </div>
+      )}
+      {initialProduct?.draftStatus === "rejected" && (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          Изменения отклонены
+          {initialProduct.rejectionReason ? `: ${initialProduct.rejectionReason}` : ""}.
+        </div>
+      )}
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
         <h2 className="font-semibold">Основное</h2>
         <Field label="Название" value={form.title} onChange={(v) => update("title", v)} />
@@ -192,26 +295,55 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
           onChange={(v) => update("description", v)}
           multiline
         />
-        <Field
-          label="URL картинки"
-          value={form.image}
-          onChange={(v) => update("image", v)}
-          placeholder="https://..."
-        />
-        <label className="text-muted-foreground flex items-center gap-2 text-xs">
-          <input
-            type="file"
-            accept="image/*"
-            disabled={isUploading}
-            className="text-xs"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              e.target.value = "";
-              void handleImageFile(file);
-            }}
-          />
-          {isUploading ? "Загрузка..." : "или загрузите файл"}
-        </label>
+        <div className="flex flex-col gap-2">
+          <span className="text-muted-foreground text-xs">Фотографии</span>
+          {form.images.length > 0 && (
+            <ul className="flex flex-col gap-2">
+              {form.images.map((url, index) => (
+                <li key={`${url}-${index}`} className="flex items-center gap-3">
+                  <div className="bg-muted relative h-16 w-16 shrink-0 overflow-hidden rounded-md">
+                    {/* Превью файла из хранилища */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt="" className="h-full w-full object-cover" />
+                  </div>
+                  <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">
+                    {index + 1}. {url}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeImage(index)}
+                    className="hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-md p-2"
+                    aria-label="Удалить фото"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-muted-foreground text-xs">
+            {form.images.length < 2
+              ? "Добавьте минимум две картинки. На карточке они идут в этом порядке."
+              : "На карточке товара фото идут в этом порядке."}
+          </p>
+          <label
+            className={`hover:bg-muted w-fit cursor-pointer rounded-lg border px-4 py-2 text-sm font-medium ${isUploading ? "pointer-events-none opacity-60" : ""}`}
+          >
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              disabled={isUploading}
+              className="sr-only"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                void handleImageFiles(files);
+              }}
+            />
+            {isUploading ? "Загрузка..." : "Загрузить фото"}
+          </label>
+        </div>
       </section>
 
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
@@ -235,7 +367,7 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
         <h2 className="font-semibold">Режим продажи</h2>
         <div className="flex flex-col gap-2">
-          {(["online", "out_of_stock", "deal_only"] as SaleMode[]).map((mode) => {
+          {(["online", "deal_only"] as SaleMode[]).map((mode) => {
             const disabled = mode === "online" && onlineLocked;
             return (
               <label
@@ -257,11 +389,11 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
             );
           })}
         </div>
-        {onlineLocked && (
-          <p className="text-muted-foreground text-xs">
-            Тариф Free: режим «В наличии» недоступен, только продажи по договорённости.
-          </p>
-        )}
+        <p className="text-muted-foreground text-xs">
+          {onlineLocked
+            ? "Тариф Free: режим «В наличии» недоступен, только продажи по договорённости."
+            : "Нет в наличии — это нулевой остаток, отдельный режим для этого не нужен."}
+        </p>
 
         {form.saleMode === "deal_only" && (
           <Field
@@ -291,39 +423,33 @@ export function ProductForm({ initialProduct }: { initialProduct?: Product }) {
 
         {form.availableDeliveries.includes("pickup") && (
           <div className="flex flex-col gap-2 border-t pt-2">
-            <div className="text-muted-foreground text-xs">Адреса самовывоза</div>
-            {form.pickupPoints.map((point, idx) => (
-              <div key={idx} className="flex items-start gap-2">
-                <input
-                  value={point.city}
-                  onChange={(e) => updatePickupPoint(idx, { city: e.target.value })}
-                  placeholder="Город"
-                  className="bg-background w-32 rounded-md border px-3 py-2 text-sm outline-none"
-                />
-                <input
-                  value={point.address}
-                  onChange={(e) => updatePickupPoint(idx, { address: e.target.value })}
-                  placeholder="Адрес"
-                  className="bg-background flex-1 rounded-md border px-3 py-2 text-sm outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => removePickupPoint(idx)}
-                  className="hover:bg-destructive/10 text-muted-foreground hover:text-destructive rounded-md p-2"
-                  aria-label="Удалить адрес"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={addPickupPoint}
-              className="text-primary flex items-center gap-1.5 self-start text-xs hover:underline"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Добавить адрес
-            </button>
+            <div className="text-muted-foreground text-xs">Пункты самовывоза</div>
+            {shopPickupPoints.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                В разделе «Доставка» ещё нет пунктов самовывоза.{" "}
+                <Link href={ROUTES.seller.delivery} className="text-primary hover:underline">
+                  Настроить
+                </Link>
+              </p>
+            ) : (
+              shopPickupPoints.map((point) => {
+                const selected = form.pickupPoints.some((item) => pointKey(item) === pointKey(point));
+                return (
+                  <label key={pointKey(point)} className="flex cursor-pointer items-start gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={selected}
+                      onChange={() => toggleShopPoint(point)}
+                    />
+                    <span className="text-sm">
+                      {point.city}, {point.address}
+                      {typeof point.maxDays === "number" ? ` · до ${point.maxDays} дн.` : ""}
+                    </span>
+                  </label>
+                );
+              })
+            )}
           </div>
         )}
       </section>

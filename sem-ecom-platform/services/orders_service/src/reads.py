@@ -13,6 +13,7 @@ from db import run_serializable
 from models.deal import Deal as DealRow
 from models.deal_event import DealEvent
 from models.item import Item
+from models.multi_order import MultiOrder
 from models.order import Order
 from models.order_event import OrderEvent
 from models.payment import Payment as PaymentRow
@@ -41,10 +42,13 @@ from service import (
     ORDER_STATUS_PAYMENT_INITIALIZED,
     PAYMENT_STATUS_CANCELLED,
     PAYMENT_STATUS_CREATED,
+    YOOKASSA_CANCELED,
     YOOKASSA_SUCCEEDED,
     OrderNotFound,
     YooKassaFailed,
     _touch,
+    promote_paid_multi,
+    save_remote_multi_payment,
 )
 
 PAGE_SIZE = 20
@@ -77,17 +81,30 @@ async def get_order(sessions: async_sessionmaker[AsyncSession], order_id: str) -
     loaded = await run_serializable(sessions, lambda session: _load_refresh_target(session, order_id))
     if loaded is None:
         raise OrderNotFound
-    deal_id, payment = loaded
-    if deal_id is not None:
-        remote_deal = await _fetch_deal(deal_id)
-        await run_serializable(sessions, lambda session: _save_deal_state(session, deal_id, remote_deal))
-    if payment is not None:
-        remote_payment = await _fetch_payment(payment[0])
-        idempotency_key = payment[1]
+    kind, primary, payment = loaded
+    if kind == "multi" and payment is not None:
+        remote_payment = await _fetch_payment(payment)
         await run_serializable(
             sessions,
-            lambda session: _save_refreshed_payment(session, order_id, idempotency_key, remote_payment),
+            lambda session, mid=primary, remote=remote_payment: save_remote_multi_payment(session, mid, remote),
         )
+    elif kind == "deal":
+        deal_id = primary
+        if deal_id is not None:
+            remote_deal = await _fetch_deal(deal_id)
+            await run_serializable(
+                sessions,
+                lambda session, did=deal_id, remote=remote_deal: _save_deal_state(session, did, remote),
+            )
+        if payment is not None:
+            remote_payment = await _fetch_payment(payment[0])
+            idempotency_key = payment[1]
+            await run_serializable(
+                sessions,
+                lambda session, key=idempotency_key, remote=remote_payment: _save_refreshed_payment(
+                    session, order_id, key, remote
+                ),
+            )
     detail = await run_serializable(sessions, lambda session: _order_detail(session, order_id))
     if detail is None:
         raise OrderNotFound
@@ -117,6 +134,8 @@ async def _list_orders(
         query = query.where(Order.updated_at < moment)
     rows = (await session.scalars(query.order_by(Order.updated_at.desc()).limit(limit + 1))).all()
     page = rows[:limit]
+    for multi_id in {row.multi_order_id for row in page if row.multi_order_id}:
+        await promote_paid_multi(session, multi_id)
     images = await _images_by_order(session, [row.order_id for row in page])
     next_cursor = encode_cursor(page[-1].updated_at) if len(rows) > limit and page else None
     return OrderList(
@@ -143,10 +162,22 @@ async def _images_by_order(session: AsyncSession, order_ids: list[str]) -> dict[
     return images
 
 
-async def _load_refresh_target(session: AsyncSession, order_id: str) -> tuple[str | None, tuple[str, str] | None] | None:
+async def _load_refresh_target(
+    session: AsyncSession, order_id: str
+) -> tuple[str, str | None, str | tuple[str, str] | None] | None:
     order = await session.get(Order, order_id)
     if order is None:
         return None
+    if order.multi_order_id:
+        multi = await session.get(MultiOrder, order.multi_order_id)
+        payment_id = None
+        if (
+            multi is not None
+            and multi.payment_id
+            and multi.payment_status not in {PAYMENT_STATUS_CREATED, PAYMENT_STATUS_CANCELLED, *YOOKASSA_CANCELED}
+        ):
+            payment_id = multi.payment_id
+        return ("multi", order.multi_order_id, payment_id)
     deal = await session.scalar(select(DealRow).where(DealRow.order_id == order_id))
     payment = None
     if deal is not None:
@@ -155,7 +186,7 @@ async def _load_refresh_target(session: AsyncSession, order_id: str) -> tuple[st
         )
         if row is not None and row.status not in {PAYMENT_STATUS_CREATED, PAYMENT_STATUS_CANCELLED}:
             payment = (row.payment_id, row.idempotency_key)
-    return (None if deal is None else deal.deal_id, payment)
+    return ("deal", None if deal is None else deal.deal_id, payment)
 
 
 async def _save_deal_state(session: AsyncSession, deal_id: str, remote_deal) -> None:
@@ -182,12 +213,28 @@ async def _order_detail(session: AsyncSession, order_id: str) -> OrderDetail | N
     order = await session.get(Order, order_id)
     if order is None:
         return None
+    if order.multi_order_id:
+        await promote_paid_multi(session, order.multi_order_id)
     items = (await session.scalars(select(Item).where(Item.order_id == order_id).order_by(Item.sku_id))).all()
+    multi = await session.get(MultiOrder, order.multi_order_id) if order.multi_order_id else None
     deal = await session.scalar(select(DealRow).where(DealRow.order_id == order_id))
     payment = None
     if deal is not None:
         payment = await session.scalar(
             select(PaymentRow).where(PaymentRow.deal_id == deal.deal_id).order_by(PaymentRow.created_at.desc())
+        )
+    payment_public = None
+    if payment is not None:
+        payment_public = PaymentPublic(
+            payment_id=payment.payment_id,
+            status=payment.status,
+            confirmation_url=payment.confirmation_url,
+        )
+    elif multi is not None and multi.payment_id:
+        payment_public = PaymentPublic(
+            payment_id=multi.payment_id,
+            status=multi.payment_status,
+            confirmation_url=multi.confirmation_url,
         )
     return OrderDetail(
         order_id=order.order_id,
@@ -203,13 +250,8 @@ async def _order_detail(session: AsyncSession, order_id: str) -> OrderDetail | N
         updated_at=order.updated_at,
         items=[_item_out(item) for item in items],
         deal=None if deal is None else DealPublic(deal_id=deal.deal_id, status=deal.status),
-        payment=None
-        if payment is None
-        else PaymentPublic(
-            payment_id=payment.payment_id,
-            status=payment.status,
-            confirmation_url=payment.confirmation_url,
-        ),
+        payment=payment_public,
+        multi_order_id=order.multi_order_id,
     )
 
 
@@ -256,6 +298,7 @@ async def _order_debug(session: AsyncSession, order_id: str) -> OrderDebug | Non
         deal_idempotency_key=order.deal_idempotency_key,
         payout_idempotency_key=order.payout_idempotency_key,
         payout_token=order.payout_token,
+        multi_order_id=order.multi_order_id,
         user_id=order.user_id,
         seller_id=order.seller_id,
         delivery_type=order.delivery_type,

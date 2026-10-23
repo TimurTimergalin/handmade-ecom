@@ -4,18 +4,66 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, X } from "lucide-react";
 
+import { CdekWidget } from "@/components/features/CdekWidget";
 import { getDeliverySettings, updateDeliverySettings } from "@/services/api";
 import type { PickupPoint } from "@/types";
+
+const WEEKDAYS: { day: number; label: string }[] = [
+  { day: 0, label: "Пн" },
+  { day: 1, label: "Вт" },
+  { day: 2, label: "Ср" },
+  { day: 3, label: "Чт" },
+  { day: 4, label: "Пт" },
+  { day: 5, label: "Сб" },
+  { day: 6, label: "Вс" },
+];
+
+function isPickupMaxDays(value: number | undefined): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 365;
+}
+
+function Toggle({
+  on,
+  label,
+  onClick,
+}: {
+  on: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={onClick}
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+        on ? "bg-primary" : "bg-foreground/20"
+      }`}
+    >
+      <span
+        className={`bg-background absolute top-0.5 left-0.5 h-5 w-5 rounded-full shadow-sm transition-transform ${
+          on ? "translate-x-5" : "translate-x-0"
+        }`}
+      />
+    </button>
+  );
+}
 
 interface FormState {
   pickupEnabled: boolean;
   pickupPoints: PickupPoint[];
   cdekEnabled: boolean;
+  cdekOfficeCode: string;
+  cdekOfficeAddress: string;
+  cdekShipDays: number[];
 }
 
 export function DeliverySettingsForm() {
   const [form, setForm] = useState<FormState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [cdekWidgetOpen, setCdekWidgetOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +74,9 @@ export function DeliverySettingsForm() {
           pickupEnabled: settings.pickupEnabled,
           pickupPoints: settings.pickupPoints ?? [],
           cdekEnabled: settings.cdekEnabled,
+          cdekOfficeCode: settings.cdekOfficeCode ?? "",
+          cdekOfficeAddress: settings.cdekOfficeAddress ?? "",
+          cdekShipDays: settings.cdekShipDays ?? [],
         });
       })
       .catch((error: unknown) => {
@@ -44,7 +95,10 @@ export function DeliverySettingsForm() {
   function addPoint() {
     setForm((current) =>
       current
-        ? { ...current, pickupPoints: [...current.pickupPoints, { city: "", address: "" }] }
+        ? {
+            ...current,
+            pickupPoints: [...current.pickupPoints, { city: "", address: "", maxDays: undefined }],
+          }
         : current
     );
   }
@@ -60,6 +114,16 @@ export function DeliverySettingsForm() {
           }
         : current
     );
+  }
+
+  function toggleShipDay(day: number) {
+    setForm((current) => {
+      if (!current) return current;
+      const selected = current.cdekShipDays.includes(day)
+        ? current.cdekShipDays.filter((item) => item !== day)
+        : [...current.cdekShipDays, day].sort((left, right) => left - right);
+      return { ...current, cdekShipDays: selected };
+    });
   }
 
   function removePoint(idx: number) {
@@ -80,6 +144,22 @@ export function DeliverySettingsForm() {
       toast.error("Заполните все адреса самовывоза");
       return;
     }
+    if (form.pickupEnabled && form.pickupPoints.some((p) => !isPickupMaxDays(p.maxDays))) {
+      toast.error("Укажите срок самовывоза целым числом от 0 до 365");
+      return;
+    }
+    if (form.cdekEnabled && !form.cdekOfficeCode.trim()) {
+      toast.error("Выберите пункт отгрузки СДЭК");
+      return;
+    }
+    if (form.cdekEnabled && !form.cdekOfficeAddress.trim()) {
+      toast.error("У пункта отгрузки СДЭК нет адреса");
+      return;
+    }
+    if (form.cdekEnabled && form.cdekShipDays.length === 0) {
+      toast.error("Выберите хотя бы один день отгрузки СДЭК");
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -90,13 +170,24 @@ export function DeliverySettingsForm() {
           ? form.pickupPoints.map((point) => ({
               city: point.city.trim(),
               address: point.address.trim(),
+              maxDays: point.maxDays as number,
             }))
           : [],
+        ...(form.cdekEnabled
+          ? {
+              cdekOfficeCode: form.cdekOfficeCode.trim(),
+              cdekOfficeAddress: form.cdekOfficeAddress.trim(),
+              cdekShipDays: form.cdekShipDays,
+            }
+          : {}),
       });
       setForm({
         pickupEnabled: saved.pickupEnabled,
         pickupPoints: saved.pickupPoints ?? [],
         cdekEnabled: saved.cdekEnabled,
+        cdekOfficeCode: saved.cdekOfficeCode ?? "",
+        cdekOfficeAddress: saved.cdekOfficeAddress ?? "",
+        cdekShipDays: saved.cdekShipDays ?? [],
       });
       toast.success("Настройки сохранены");
     } catch (error) {
@@ -118,19 +209,11 @@ export function DeliverySettingsForm() {
             <h2 className="font-semibold">Самовывоз</h2>
             <p className="text-muted-foreground mt-0.5 text-xs">Покупатели забирают товар сами</p>
           </div>
-          <button
-            type="button"
+          <Toggle
+            on={form.pickupEnabled}
+            label="Самовывоз"
             onClick={() => toggle("pickupEnabled")}
-            className={`relative h-6 w-11 rounded-full transition-colors ${
-              form.pickupEnabled ? "bg-primary" : "bg-muted"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                form.pickupEnabled ? "translate-x-5.5" : "translate-x-0.5"
-              }`}
-            />
-          </button>
+          />
         </div>
 
         {form.pickupEnabled && (
@@ -149,6 +232,21 @@ export function DeliverySettingsForm() {
                   onChange={(e) => updatePoint(idx, { address: e.target.value })}
                   placeholder="Адрес"
                   className="bg-background flex-1 rounded-md border px-3 py-2 text-sm outline-none"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={365}
+                  step={1}
+                  value={point.maxDays ?? ""}
+                  onChange={(e) =>
+                    updatePoint(idx, {
+                      maxDays: e.target.value === "" ? undefined : Number(e.target.value),
+                    })
+                  }
+                  placeholder="Максимум, дней"
+                  aria-label="Максимум, дней"
+                  className="bg-background w-40 rounded-md border px-3 py-2 text-sm outline-none"
                 />
                 <button
                   type="button"
@@ -178,24 +276,61 @@ export function DeliverySettingsForm() {
             <h2 className="font-semibold">СДЭК</h2>
             <p className="text-muted-foreground mt-0.5 text-xs">Отправка через курьерскую службу</p>
           </div>
-          <button
-            type="button"
-            onClick={() => toggle("cdekEnabled")}
-            className={`relative h-6 w-11 rounded-full transition-colors ${
-              form.cdekEnabled ? "bg-primary" : "bg-muted"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                form.cdekEnabled ? "translate-x-5.5" : "translate-x-0.5"
-              }`}
-            />
-          </button>
+          <Toggle on={form.cdekEnabled} label="СДЭК" onClick={() => toggle("cdekEnabled")} />
         </div>
         {form.cdekEnabled && (
-          <p className="text-muted-foreground border-t pt-3 text-xs">
-            Интеграция с API СДЭК будет доступна в следующем обновлении.
-          </p>
+          <div className="flex flex-col gap-3 border-t pt-3">
+            <div className="flex flex-col gap-1">
+              <button
+                type="button"
+                onClick={() => setCdekWidgetOpen(true)}
+                className="text-primary self-start text-xs hover:underline"
+              >
+                Выбрать пункт отгрузки
+              </button>
+              {form.cdekOfficeCode ? (
+                <p className="text-sm">
+                  {form.cdekOfficeAddress}
+                  <span className="text-muted-foreground"> · {form.cdekOfficeCode}</span>
+                </p>
+              ) : (
+                <p className="text-muted-foreground text-xs">Пункт отгрузки не выбран</p>
+              )}
+            </div>
+            <div className="flex flex-col gap-2">
+              <div className="text-muted-foreground text-xs">Дни отгрузки</div>
+              <div className="flex flex-wrap gap-2">
+                {WEEKDAYS.map(({ day, label }) => {
+                  const checked = form.cdekShipDays.includes(day);
+                  return (
+                    <label key={day} className="flex items-center gap-1.5 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleShipDay(day)}
+                      />
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <CdekWidget
+              open={cdekWidgetOpen}
+              onOpenChange={setCdekWidgetOpen}
+              onSelect={(office) =>
+                setForm((current) =>
+                  current
+                    ? {
+                        ...current,
+                        cdekOfficeCode: office.code,
+                        cdekOfficeAddress: office.address,
+                      }
+                    : current
+                )
+              }
+            />
+          </div>
         )}
       </section>
 

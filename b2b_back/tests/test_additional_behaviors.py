@@ -6,10 +6,48 @@ import pytest
 from sqlalchemy import select
 
 from marketplace.b2b.integrations.contracts import SubscriptionState
-from marketplace.b2b.models.entities import Store
+from uuid import uuid4
+
+from marketplace.b2b.models.entities import Store, Subscription
 from marketplace.shared.db import utcnow
 from marketplace.shared.errors import DomainError
-from tests.conftest import KEY, product
+from tests.conftest import KEY, product, set_yookassa_shop
+
+
+async def test_renewal_task_is_registered_once_and_can_be_declined(cluster, seller):
+    state, client = cluster.apps["b2b"].state, cluster.client
+    task_id = uuid4()
+    async with state.sessions() as db:
+        store = await db.scalar(select(Store))
+        sub = await db.scalar(select(Subscription))
+        store.plan_tier = "premium"
+        sub.status = "confirmed"
+        sub.valid_until = utcnow() + timedelta(days=30)
+        sub.online_payments = True
+        sub.auto_renew = True
+        sub.payment_method_id = "pm_test"
+        sub.renewal_task_id = task_id
+        sub.renewal_registered = False
+        await db.commit()
+    async with httpx.AsyncClient(transport=cluster.transport, headers={"X-Service-Key": KEY}) as internal:
+        listed = await internal.get("http://b2b/api/internal/subscription-tasks/pending")
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["data"][0]["id"] == str(task_id)
+        marked = await internal.post(
+            f"http://b2b/api/internal/subscription-tasks/{task_id}/registered"
+        )
+        assert marked.json()["data"]["registered"] is True
+        again = await internal.get("http://b2b/api/internal/subscription-tasks/pending")
+        assert again.json()["data"] == []
+        begin = await internal.post(f"http://b2b/api/internal/subscription-tasks/{task_id}/begin")
+        assert begin.json()["data"]["action"] == "charge"
+    declined = await client.post("/api/seller/subscription/auto-renew", json={"enabled": False})
+    assert declined.status_code == 200, declined.text
+    async with httpx.AsyncClient(transport=cluster.transport, headers={"X-Service-Key": KEY}) as internal:
+        skipped = await internal.post(f"http://b2b/api/internal/subscription-tasks/{task_id}/begin")
+        assert skipped.json()["data"]["action"] == "skip"
+    data = (await client.get("/api/seller/subscription")).json()["data"]
+    assert data["tier"] == "premium" and data["autoRenew"] is False
 
 
 async def test_configurable_plans_and_success_dashboard(cluster, seller):
@@ -46,11 +84,19 @@ async def test_invalid_role_confirmation_keeps_pending(cluster):
     async def wrong(user_id, seller_id, profile=None):
         return SimpleNamespace(id=user_id, roles={"buyer"})
 
-    state.users.ensure_seller = wrong
     response = await cluster.client.post(
         "/api/users/me/become-seller", json={"username": "pending", "displayName": "Тест"}
     )
-    assert response.status_code == 502
+    assert response.status_code == 200, response.text
+    shop_id = response.json()["data"]["seller"]["id"]
+    state.users.ensure_seller = wrong
+    logged = await cluster.client.post(
+        "/api/moderation/login",
+        json={"login": "moderator", "password": "moderator-local"},
+    )
+    assert logged.status_code == 200, logged.text
+    refused = await cluster.client.post(f"/api/moderation/shops/{shop_id}/accept")
+    assert refused.status_code == 502, refused.text
     async with state.sessions() as db:
         assert (await db.scalar(select(Store))).onboarding_status == "pending"
 
@@ -61,6 +107,7 @@ async def test_invalid_role_confirmation_keeps_pending(cluster):
 )
 async def test_invalid_subscription_proof_rejected(cluster, seller, status, tier, validity):
     state, client = cluster.apps["b2b"].state, cluster.client
+    await set_yookassa_shop(client)
     await client.post(
         "/api/plans/subscribe", json={"tier": "premium"}, headers={"Idempotency-Key": "x"}
     )
@@ -88,6 +135,7 @@ async def test_duplicate_checkout_prevents_extra_payment_calls(cluster, seller):
         return await original(*args)
 
     state.payments.initiate = initiate
+    await set_yookassa_shop(client)
     for _ in range(2):
         assert (
             await client.post(
@@ -108,6 +156,7 @@ async def test_duplicate_checkout_prevents_extra_payment_calls(cluster, seller):
 
 async def test_premium_relaxes_both_quotas(cluster, seller):
     state, client = cluster.apps["b2b"].state, cluster.client
+    await set_yookassa_shop(client)
     await client.post(
         "/api/plans/subscribe", json={"tier": "premium"}, headers={"Idempotency-Key": "upgrade"}
     )
@@ -162,7 +211,7 @@ async def test_post_product_section_degrades_after_confirmed_publication(cluster
     cluster.apps["b2b"].state.goods.batch = fail
     response = await client.post(f"/api/seller/posts/{post_id}/publish")
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "published"
+    assert response.json()["data"]["moderationStatus"] == "pending"
     assert response.json()["data"]["products"] == []
     assert response.json()["data"]["unavailableSections"] == ["products"]
 

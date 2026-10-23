@@ -82,6 +82,13 @@ class HTTPClient:
                 pass
             if code == "QUOTA_EXCEEDED":
                 message = "Достигнут лимит тарифа"
+            elif status == 401 and self.source == "users":
+                message = "Сессия истекла. Войдите снова."
+            elif status == 409 and self.source == "orders":
+                message = (
+                    _short_message(upstream_error.get("message"))
+                    or "Зависимый сервис отклонил запрос"
+                )
             elif status == 403 and self.source in _OWN_SOURCES:
                 message = (
                     _short_message(upstream_error.get("message"))

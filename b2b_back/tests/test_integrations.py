@@ -1,5 +1,5 @@
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -10,7 +10,7 @@ from marketplace.b2b.models.entities import Store, Subscription
 from marketplace.shared.db import utcnow
 from marketplace.shared.errors import DomainError
 from marketplace.shared.schemas import OrderStatus
-from tests.conftest import onboard, product
+from tests.conftest import KEY, onboard, product, set_yookassa_shop
 
 
 async def failure(*args, **kwargs):
@@ -19,17 +19,27 @@ async def failure(*args, **kwargs):
 
 async def test_onboarding_recovers_partial_failure(cluster):
     state = cluster.apps["b2b"].state
-    original = state.users.ensure_seller
-    state.users.ensure_seller = failure
     response = await cluster.client.post(
         "/api/users/me/become-seller", json={"username": "pending_shop", "displayName": "Магазин"}
     )
-    assert response.status_code == 503
+    assert response.status_code == 200, response.text
+    shop_id = response.json()["data"]["seller"]["id"]
     async with state.sessions() as db:
         store = await db.scalar(select(Store))
         assert store.onboarding_status == "pending"
         reserved = store.id
     assert (await cluster.client.get("/api/seller/profile")).status_code == 403
+    original = state.users.ensure_seller
+    state.users.ensure_seller = failure
+    logged = await cluster.client.post(
+        "/api/moderation/login",
+        json={"login": "moderator", "password": "moderator-local"},
+    )
+    assert logged.status_code == 200, logged.text
+    refused = await cluster.client.post(f"/api/moderation/shops/{shop_id}/accept")
+    assert refused.status_code == 503, refused.text
+    async with state.sessions() as db:
+        assert (await db.scalar(select(Store))).onboarding_status == "pending"
     state.users.ensure_seller = original
     store = await onboard(cluster.client, "pending_shop")
     assert store["id"] == str(reserved)
@@ -37,6 +47,7 @@ async def test_onboarding_recovers_partial_failure(cluster):
 
 async def test_subscription_confirmation_only_and_repeat(cluster, seller):
     client, state = cluster.client, cluster.apps["b2b"].state
+    await set_yookassa_shop(client)
     response = await client.post(
         "/api/plans/subscribe", json={"tier": "premium"}, headers={"Idempotency-Key": "upgrade-1"}
     )
@@ -78,6 +89,7 @@ async def test_payment_refusal_outage_and_free_online_forbidden(cluster, seller)
     ).status_code == 400
     assert (await client.post("/api/seller/subscription/sync")).status_code == 400
     assert (await client.post("/api/plans/subscribe", json={"tier": "premium"})).status_code == 400
+    await set_yookassa_shop(client)
     await client.post(
         "/api/plans/subscribe", json={"tier": "premium"}, headers={"Idempotency-Key": "x"}
     )
@@ -95,6 +107,7 @@ async def test_payment_refusal_outage_and_free_online_forbidden(cluster, seller)
 
 async def test_subscription_wrong_owner_confirmation_rejected(cluster, seller):
     client, state = cluster.client, cluster.apps["b2b"].state
+    await set_yookassa_shop(client)
     response = await client.post(
         "/api/plans/subscribe", json={"tier": "premium"}, headers={"Idempotency-Key": "x"}
     )
@@ -112,6 +125,51 @@ async def test_subscription_wrong_owner_confirmation_rejected(cluster, seller):
     state.payments.state = wrong
     assert (await client.post("/api/seller/subscription/sync")).status_code == 502
     assert (await client.get("/api/seller/subscription")).json()["data"]["tier"] == "free"
+
+
+async def test_premium_requires_yookassa_shop_id(cluster, seller):
+    client, state = cluster.client, cluster.apps["b2b"].state
+    store, media = seller
+    refused = await client.post(
+        "/api/plans/subscribe",
+        json={"tier": "premium"},
+        headers={"Idempotency-Key": "need-shop"},
+    )
+    assert refused.status_code == 400
+    assert "shopId" in refused.json()["error"]["message"]
+    assert (
+        await client.patch("/api/seller/profile", json={"yookassaShopId": "abc"})
+    ).status_code == 400
+    saved = await set_yookassa_shop(client, "987654")
+    assert saved["yookassaShopId"] == "987654"
+    started = await client.post(
+        "/api/plans/subscribe",
+        json={"tier": "premium"},
+        headers={"Idempotency-Key": "need-shop"},
+    )
+    assert started.status_code == 200, started.text
+    async with httpx.AsyncClient(
+        transport=cluster.transport, headers={"X-Service-Key": KEY}
+    ) as internal:
+        token = await internal.get(f"http://b2b/api/internal/sellers/{store['id']}/payout-token")
+    assert token.status_code == 200, token.text
+    assert token.json()["data"]["yookassaShopId"] == "987654"
+    assert "payoutToken" in token.json()["data"]
+    state.payments.confirmed = True
+    assert (await client.post("/api/seller/subscription/sync")).json()["data"]["tier"] == "premium"
+    assert (
+        await client.patch("/api/seller/profile", json={"yookassaShopId": " "})
+    ).status_code == 400
+    async with state.sessions() as db:
+        row = await db.get(Store, UUID(store["id"]))
+        row.yookassa_shop_id = None
+        await db.commit()
+    online = await product(client, media["url"], saleMode="online", availableDeliveries=["cdek"])
+    assert online.status_code == 400, online.text
+    assert "shopId" in online.json()["error"]["message"]
+    await set_yookassa_shop(client, "987654")
+    online = await product(client, media["url"], saleMode="online", availableDeliveries=["cdek"])
+    assert online.status_code == 201, online.text
 
 
 async def test_expired_plan_is_effectively_free(cluster, seller):

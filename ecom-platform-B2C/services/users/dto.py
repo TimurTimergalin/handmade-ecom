@@ -19,6 +19,7 @@ def user_to_dto(user: User) -> dict:
         email=user.email,
         roles=roles,
         bio=user.bio,
+        phone=user.phone,
         createdAt=user.created_at,
     )
     return dto_json(dto)
@@ -41,5 +42,13 @@ def seller_to_dto(
         productsCount=seller.products_count,
         postsCount=seller.posts_count,
         joinedAt=seller.created_at,
+        legalType=seller.legal_type if seller.legal_type in {"person", "company"} else None,
+        lastName=seller.last_name,
+        firstName=seller.first_name,
+        patronymic=seller.patronymic,
+        legalName=seller.legal_name,
+        inn=seller.inn,
+        ogrn=seller.ogrn,
+        legalAddress=seller.legal_address,
     )
     return dto_json(dto)

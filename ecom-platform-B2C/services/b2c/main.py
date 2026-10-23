@@ -19,6 +19,9 @@ from config import B2CSettings
 from facade import FrontendFacade
 from routes_actions import bind as bind_actions
 from routes_actions import router as actions_router
+from routes_cdek import bind as bind_cdek
+from routes_cdek import close_client as close_cdek
+from routes_cdek import router as cdek_router
 from routes_pages import router as pages_router
 
 logger = get_logger("b2c")
@@ -41,6 +44,7 @@ settings = B2CSettings(
     auth_dev_mode=os.getenv("AUTH_DEV_MODE", "true").lower() == "true",
     payment_stub_url=os.getenv("B2C_PAYMENT_STUB_URL", "https://yoomoney.ru/checkout/demo"),
     b2b_url=os.getenv("B2C_B2B_URL", ""),
+    b2b_goods_url=os.getenv("B2C_B2B_GOODS_URL", "http://b2b-goods:8000/api"),
     service_key=os.getenv("SERVICE_KEY", ""),
     yookassa_account_id=os.getenv("YOOKASSA_ACCOUNT_ID", ""),
     order_processor_url=os.getenv("ORDER_PROCESSOR_URL", ""),
@@ -49,23 +53,28 @@ settings = B2CSettings(
     yandex_redirect_uri=os.getenv(
         "YANDEX_REDIRECT_URI", "http://localhost:3000/auth/yandex/callback"
     ),
+    cdek_api_url=os.getenv("CDEK_API_URL", "https://api.edu.cdek.ru/v2"),
+    cdek_client_id=os.getenv("CDEK_CLIENT_ID", ""),
+    cdek_client_secret=os.getenv("CDEK_CLIENT_SECRET", ""),
 )
 upstreams = Upstreams(settings)
 facade = FrontendFacade(upstreams)
 pages.bind(upstreams)
 bind_actions(upstreams)
 bind_contract(facade, settings)
+bind_cdek(settings)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     await upstreams.aclose()
+    await close_cdek()
 
 
 app = create_app(
     settings,
-    routers=[contract_router, pages_router, actions_router],
+    routers=[contract_router, pages_router, actions_router, cdek_router],
     lifespan=lifespan,
     cors_origins=[settings.cors_origin],
     auth_dev_mode=settings.auth_dev_mode,

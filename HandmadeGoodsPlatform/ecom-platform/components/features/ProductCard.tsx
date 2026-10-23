@@ -2,12 +2,13 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { ProductSnippetActions } from "./ProductSnippetActions";
-import { ROUTES, DELIVERY_LABELS, SALE_MODE_LABELS } from "@/lib/constants";
+import { ROUTES, SALE_MODE_LABELS, saleAvailability } from "@/lib/constants";
+import { formatSnippetDeliveryLabel } from "@/lib/delivery-date";
 import { formatPrice } from "@/lib/utils";
 import type { Product } from "@/types";
 
 export function ProductCard({ product }: { product: Product }) {
-  const isAvailable = product.saleMode === "online";
+  const isAvailable = saleAvailability(product) === "online";
 
   return (
     <Link
@@ -24,17 +25,17 @@ export function ProductCard({ product }: { product: Product }) {
         />
       </div>
 
-      <div className="flex flex-1 flex-col gap-1 p-3">
+      <div className="flex h-[8.875rem] flex-col gap-1 p-3">
         <h3 className="line-clamp-2 text-sm leading-tight font-medium">{product.title}</h3>
 
-        <div className="mt-auto text-base font-bold">{formatPrice(product.price)}</div>
+        <div className="text-base leading-tight font-bold">{formatPrice(product.price)}</div>
 
-        <div className="text-muted-foreground text-xs">
-          {product.availableDeliveries.map((d) => DELIVERY_LABELS[d]).join(" · ")}
-          {!isAvailable && ` · ${SALE_MODE_LABELS[product.saleMode]}`}
+        <div className="text-muted-foreground text-xs leading-tight">
+          {formatSnippetDeliveryLabel(product)}
+          {!isAvailable && ` · ${SALE_MODE_LABELS[saleAvailability(product)]}`}
         </div>
 
-        <ProductSnippetActions product={product} />
+        <ProductSnippetActions product={product} className="mt-auto w-full" />
       </div>
     </Link>
   );

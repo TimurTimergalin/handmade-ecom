@@ -6,6 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Path, Query, Request, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,17 +17,18 @@ from marketplace.b2b.schemas.store import (
     StatusChange,
     PayoutToken,
     StoreCreate,
+    AutoRenew,
     StorePatch,
     Subscribe,
 )
 from marketplace.b2b.services.facade import SellerFacade
 from marketplace.b2b.services.media import MediaService
-from marketplace.b2b.services.stores import StoreService
+from marketplace.b2b.services.stores import StoreService, shop_card
 from marketplace.b2b.services.subscriptions import SubscriptionService
 from marketplace.goods.schemas.products import ProductCreate, ProductPatch
 from marketplace.publications.schemas.posts import PostCreate, PostPatch
 from marketplace.shared.db import session
-from marketplace.shared.errors import invalid
+from marketplace.shared.errors import DomainError, forbidden, invalid, missing
 from marketplace.shared.readmodels import SellerBatch
 from marketplace.shared.schemas import (
     DTO,
@@ -68,18 +70,92 @@ Ctx = Annotated[Context, Depends(context)]
 @router.post("/users/me/become-seller", response_model=Envelope[dict])
 async def onboard(request: Request, db: DB, user: User, payload: StoreCreate):
     svc = StoreService(db, request.app.state)
-    confirmed, store = await svc.onboard(user, payload)
+    store = await svc.onboard(user, payload)
+    if store.onboarding_status == "active":
+        seller = await SellerFacade(db, request.app.state).profile(store)
+    else:
+        seller = shop_card(store)
+    seller["onboardingStatus"] = store.onboarding_status
     return {
         "data": {
-            "user": confirmed,
-            "seller": await SellerFacade(db, request.app.state).profile(store),
+            "user": user.model_dump(mode="json", by_alias=True),
+            "seller": seller,
         }
     }
+
+
+@router.get("/users/me/seller-application", response_model=Envelope[dict])
+async def seller_application(db: DB, user: User):
+    store = await StoreService(db, None).repo.by_owner(user.id)
+    if store is None:
+        return {"data": {"status": None, "rejectionReason": None}}
+    return {
+        "data": {
+            "status": store.onboarding_status,
+            "rejectionReason": store.rejection_reason,
+        }
+    }
+
+
+@router.post("/users/me/seller-application/avatar", response_model=Envelope[dict], status_code=201)
+async def application_avatar(request: Request, db: DB, user: User, file: UploadFile):
+    from marketplace.b2b.services.media import MediaService
+
+    store = await StoreService(db, request.app.state).repo.by_owner(user.id)
+    if store is None or store.onboarding_status not in {"pending", "rejected"}:
+        forbidden("Сначала отправьте заявку")
+    uploaded = await MediaService(db, request.app.state).upload(store, file)
+    store.avatar = uploaded["url"]
+    await db.flush()
+    return {"data": uploaded}
+
+
+@router.get("/seller/yookassa/connect", response_model=Envelope[dict])
+async def yookassa_connect(ctx: Ctx):
+    from marketplace.b2b.services.yookassa_oauth import connect_url
+
+    url = connect_url(ctx.request.app.state.settings, str(ctx.store.id))
+    return {"data": {"url": url}}
+
+
+@router.get("/seller/yookassa/callback")
+async def yookassa_callback(
+    request: Request,
+    db: DB,
+    user: User,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    from marketplace.b2b.services.yookassa_oauth import account_id_from_code, store_id_from_state
+
+    settings = request.app.state.settings
+    profile = settings.seller_profile_url
+    if error or not code or not state:
+        return RedirectResponse(f"{profile}?yookassa=denied", status_code=302)
+    try:
+        store_id = store_id_from_state(settings, state)
+        account_id = await account_id_from_code(settings, code)
+    except DomainError:
+        return RedirectResponse(f"{profile}?yookassa=error", status_code=302)
+    store = await StoreService(db, request.app.state).repo.by_id(store_id, lock=True)
+    if store is None or store.owner_user_id != user.id or store.onboarding_status != "active":
+        return RedirectResponse(f"{profile}?yookassa=error", status_code=302)
+    store.yookassa_shop_id = account_id
+    await db.flush()
+    return RedirectResponse(f"{profile}?yookassa=connected", status_code=302)
 
 
 @router.get("/seller/profile", response_model=Envelope[dict])
 async def profile(ctx: Ctx):
     return {"data": await ctx.facade.profile(ctx.store)}
+
+
+@router.post("/seller/profile/revert", response_model=Envelope[dict])
+async def revert_profile(ctx: Ctx):
+    store = await ctx.svc.repo.by_id(ctx.store.id, lock=True)
+    await ctx.svc.discard_profile_draft(store)
+    return {"data": await ctx.facade.profile(store)}
 
 
 @router.patch("/seller/profile", response_model=Envelope[dict])
@@ -173,6 +249,16 @@ async def update_product(ctx: Ctx, product_id: UUID, payload: ProductPatch):
     }
 
 
+@router.post("/products/{product_id}/revert", response_model=Envelope[ProductView])
+async def revert_product(ctx: Ctx, product_id: UUID):
+    return {
+        "data": await ctx.facade.products(
+            ctx.store,
+            await ctx.request.app.state.goods.discard_product_draft(ctx.store.id, product_id),
+        )
+    }
+
+
 @router.delete("/products/{product_id}", response_model=Envelope[dict])
 async def delete_product(ctx: Ctx, product_id: UUID):
     await ctx.request.app.state.goods.delete(ctx.store.id, product_id)
@@ -226,6 +312,16 @@ async def update_post(ctx: Ctx, post_id: UUID, payload: PostPatch):
     }
 
 
+@router.post("/posts/{post_id}/revert", response_model=Envelope[PostView])
+async def revert_post(ctx: Ctx, post_id: UUID):
+    return {
+        "data": await ctx.facade.posts(
+            ctx.store,
+            await ctx.request.app.state.publications.discard_post_draft(ctx.store.id, post_id),
+        )
+    }
+
+
 @router.post("/seller/posts/{post_id}/publish", response_model=Envelope[PostView])
 async def publish_post(ctx: Ctx, post_id: UUID):
     return {
@@ -268,6 +364,63 @@ async def subscribe(ctx: Ctx, payload: Subscribe, key: Key):
 async def sync(ctx: Ctx):
     store = await ctx.svc.repo.by_id(ctx.store.id, lock=True)
     return {"data": await SubscriptionService(ctx.svc.db, ctx.request.app.state).sync(store)}
+
+
+@router.post("/seller/subscription/auto-renew", response_model=Envelope[dict])
+async def auto_renew(ctx: Ctx, payload: AutoRenew):
+    return {
+        "data": await SubscriptionService(ctx.svc.db, ctx.request.app.state).set_auto_renew(
+            ctx.store, payload.enabled
+        )
+    }
+
+
+@router.get(
+    "/internal/subscription-tasks/pending",
+    dependencies=[Depends(internal)],
+    response_model=Envelope[list[dict]],
+)
+async def pending_renewals(request: Request, db: DB):
+    return {
+        "data": await SubscriptionService(db, request.app.state).unregistered_renewals()
+    }
+
+
+@router.post(
+    "/internal/subscription-tasks/{task_id}/registered",
+    dependencies=[Depends(internal)],
+    response_model=Envelope[dict],
+)
+async def register_renewal(request: Request, db: DB, task_id: UUID):
+    saved = await SubscriptionService(db, request.app.state).mark_renewal_registered(task_id)
+    return {"data": {"registered": saved}}
+
+
+@router.post(
+    "/internal/subscription-tasks/{task_id}/begin",
+    dependencies=[Depends(internal)],
+    response_model=Envelope[dict],
+)
+async def begin_renewal(request: Request, db: DB, task_id: UUID):
+    return {"data": await SubscriptionService(db, request.app.state).begin_renewal(task_id)}
+
+
+class RenewalResult(DTO):
+    status: str = Field(pattern=r"^(succeeded|failed)$")
+    payment_id: str | None = Field(default=None, max_length=200)
+
+
+@router.post(
+    "/internal/subscription-tasks/{task_id}/finish",
+    dependencies=[Depends(internal)],
+    response_model=Envelope[dict],
+)
+async def finish_renewal(request: Request, db: DB, task_id: UUID, payload: RenewalResult):
+    return {
+        "data": await SubscriptionService(db, request.app.state).finish_renewal(
+            task_id, payload.status, payload.payment_id
+        )
+    }
 
 
 @router.get("/seller/dashboard", response_model=Envelope[dict])
@@ -362,6 +515,28 @@ async def entitlements_batch(request: Request, db: DB, payload: SellerBatch):
 
 
 @router.get(
+    "/internal/sellers/{seller_id}/cdek-shipment",
+    dependencies=[Depends(internal)],
+    response_model=Envelope[dict],
+    tags=["Store read API"],
+)
+async def seller_cdek_shipment(db: DB, seller_id: UUID):
+    from marketplace.b2b.models.entities import DeliverySettings
+
+    settings = await db.get(DeliverySettings, seller_id)
+    code = (settings.cdek_office_code or "").strip() if settings is not None else ""
+    if settings is None or not settings.cdek_enabled or not code:
+        missing()
+    return {
+        "data": {
+            "officeCode": code,
+            "officeAddress": (settings.cdek_office_address or "").strip(),
+            "shipDays": list(settings.cdek_ship_days or []),
+        }
+    }
+
+
+@router.get(
     "/internal/sellers/{seller_id}/payout-token",
     dependencies=[Depends(internal)],
     response_model=Envelope[dict],
@@ -370,7 +545,8 @@ async def entitlements_batch(request: Request, db: DB, payload: SellerBatch):
 async def seller_payout_token(db: DB, seller_id: UUID):
     store = await db.get(Store, seller_id)
     token = store.payout_token if store is not None else None
-    return {"data": {"payoutToken": token}}
+    shop_id = store.yookassa_shop_id if store is not None else None
+    return {"data": {"payoutToken": token, "yookassaShopId": shop_id}}
 
 
 @router.post(

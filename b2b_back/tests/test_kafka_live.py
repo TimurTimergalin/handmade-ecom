@@ -5,6 +5,7 @@ import os
 import time
 from uuid import uuid4
 
+import httpx
 import pytest
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient
@@ -13,7 +14,7 @@ from sqlalchemy import func, select
 from marketplace.shared.messaging.models import tables_for
 from marketplace.shared.messaging.schema import EVENTS
 from scripts.kafka_init import provision
-from tests.conftest import onboard, product, upload
+from tests.conftest import KEY, onboard, product, upload
 from tests.test_events import outbox
 
 pytestmark = pytest.mark.kafka
@@ -86,6 +87,13 @@ async def test_real_kafka_domain_events_duplicate_invalid_message_and_dlq(kafka_
     await onboard(cluster.client)
     media = await upload(cluster.client)
     item = (await product(cluster.client, media["url"])).json()["data"]
+    async with httpx.AsyncClient(
+        transport=cluster.transport, headers={"X-Service-Key": KEY}
+    ) as internal:
+        accepted = await internal.post(
+            f"http://goods/api/internal/moderation/products/{item['id']}/accept"
+        )
+        assert accepted.status_code == 200, accepted.text
     post = (await cluster.client.post("/api/posts", json={"title": "Draft"})).json()["data"]
     assert (
         await cluster.client.patch(

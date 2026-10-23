@@ -23,7 +23,7 @@ async def test_demo_seed_is_idempotent_through_three_service_http(cluster, monke
     monkeypatch.setattr(seed.httpx, "AsyncClient", original)
     assert (await cluster.client.get("/api/seller/products")).json()["data"]["total"] == 3
     posts = (await cluster.client.get("/api/seller/posts")).json()["data"]
-    assert posts["total"] == 2 and all(p["status"] == "published" for p in posts["items"])
+    assert posts["total"] == 2 and all(p["moderationStatus"] == "pending" for p in posts["items"])
     assert (await cluster.client.get("/api/seller/subscription")).json()["data"]["tier"] == "free"
     assert len(cluster.apps["b2b"].state.storage.objects) == 1
 

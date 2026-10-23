@@ -3,7 +3,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { MapPin, Truck } from "lucide-react";
 
-import { CompletePickupForm } from "@/components/features/CompletePickupForm";
+import { CancelOrderButton } from "@/components/features/CancelOrderButton";
+import { RepayOrderButton } from "@/components/features/RepayOrderButton";
 import { getOrder } from "@/services/api";
 import { DELIVERY_LABELS, ORDER_STATUS_LABELS, ROUTES } from "@/lib/constants";
 import { cn, formatPrice, timeAgo } from "@/lib/utils";
@@ -16,7 +17,8 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
     notFound();
   }
 
-  const showPickupCode = order.delivery === "pickup" && order.status === "shipped";
+  const pickupReady = order.delivery === "pickup" && (order.status === "delivered" || order.status === "shipped");
+  const pickupCode = pickupReady ? order.receivalCode : null;
 
   return (
     <div className="container mx-auto flex max-w-3xl flex-col gap-6 px-4 py-6">
@@ -33,8 +35,10 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
           className={cn(
             "rounded-full px-3 py-1.5 text-xs font-medium",
             order.status === "delivered" && "bg-green-100 text-green-800",
+            order.status === "completed" && "bg-green-100 text-green-800",
             order.status === "cancelled" && "bg-red-100 text-red-800",
             order.status === "shipped" && "bg-blue-100 text-blue-800",
+            order.status === "delivering" && "bg-blue-100 text-blue-800",
             (order.status === "paid" || order.status === "created") && "bg-amber-100 text-amber-800"
           )}
         >
@@ -62,6 +66,12 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
         {order.pickupPoint && (
           <div className="text-muted-foreground pl-6 text-sm">
             {order.pickupPoint.city}, {order.pickupPoint.address}
+          </div>
+        )}
+        {order.trackingNumber && order.delivery === "cdek" && (
+          <div className="pl-6 text-sm">
+            <span className="text-muted-foreground">Трек-номер: </span>
+            <span className="font-mono">{order.trackingNumber}</span>
           </div>
         )}
       </section>
@@ -96,9 +106,22 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
           <span className="font-medium">Итого</span>
           <span className="text-xl font-bold">{formatPrice(order.total)}</span>
         </div>
+        {order.status === "created" && <RepayOrderButton orderId={order.id} />}
+        {(order.status === "created" ||
+          order.status === "paid" ||
+          (order.delivery === "pickup" &&
+            (order.status === "delivered" || order.status === "shipped"))) && (
+          <CancelOrderButton orderId={order.id} />
+        )}
       </section>
 
-      {showPickupCode && <CompletePickupForm orderId={order.id} />}
+      {pickupCode && (
+        <section className="bg-card flex flex-col gap-2 rounded-xl border p-4">
+          <h2 className="font-semibold">Код выдачи</h2>
+          <p className="text-muted-foreground text-sm">Назовите этот код продавцу, когда заберёте заказ.</p>
+          <div className="font-mono text-3xl tracking-widest">{pickupCode}</div>
+        </section>
+      )}
     </div>
   );
 }

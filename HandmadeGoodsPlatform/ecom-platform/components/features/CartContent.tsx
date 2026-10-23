@@ -24,6 +24,7 @@ export function CartContent({ allProducts }: { allProducts: Product[] }) {
   const groups = useMemo(() => groupCartItems(items, allProducts), [items, allProducts]);
 
   const total = useMemo(() => calculateTotal(groups, allProducts), [groups, allProducts]);
+  const canCheckout = groups.some((group) => group.items.length > 0);
 
   if (items.length === 0) {
     return (
@@ -45,9 +46,19 @@ export function CartContent({ allProducts }: { allProducts: Product[] }) {
         <CartGroup key={group.key} group={group} productById={productById} />
       ))}
 
-      <div className="bg-card sticky bottom-4 flex items-center justify-between gap-4 rounded-xl border p-4 shadow-sm">
-        <div className="text-muted-foreground text-sm">Итого по всем продавцам</div>
-        <div className="text-xl font-bold">{formatPrice(total)}</div>
+      <div className="bg-card sticky bottom-4 flex flex-wrap items-center justify-between gap-4 rounded-xl border p-4 shadow-sm">
+        <div>
+          <div className="text-muted-foreground text-sm">Итого по всем продавцам</div>
+          <div className="text-xl font-bold">{formatPrice(total)}</div>
+        </div>
+        {canCheckout && (
+          <Link
+            href={ROUTES.checkout}
+            className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-lg px-5 py-2.5 text-sm font-medium transition-colors"
+          >
+            К оформлению
+          </Link>
+        )}
       </div>
     </div>
   );

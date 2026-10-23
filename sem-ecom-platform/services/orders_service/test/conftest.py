@@ -61,19 +61,10 @@ def yookassa(monkeypatch):
     calls = []
     sequence = {"n": 0}
 
-    def create_deal(params, idempotency_key=None):
-        sequence["n"] += 1
-        calls.append(("deal", idempotency_key, params))
-        return deal_response(deal_id=f"dl-{sequence['n']}")
-
     def create_payment(params, idempotency_key=None):
         sequence["n"] += 1
         calls.append(("payment", idempotency_key, params))
         return payment_response(payment_id=f"pay-{sequence['n']}")
-
-    def create_payout(params, idempotency_key=None):
-        calls.append(("payout", idempotency_key, params))
-        return Remote(id="po-1", status="succeeded")
 
     def create_refund(params, idempotency_key=None):
         calls.append(("refund", idempotency_key, params))
@@ -81,17 +72,19 @@ def yookassa(monkeypatch):
 
     def find_payment(payment_id):
         calls.append(("find_payment", payment_id))
-        return payment_response(payment_id=payment_id, status="succeeded")
+        return payment_response(payment_id=payment_id, status="pending")
+
+    def cancel_payment(payment_id, idempotency_key=None):
+        calls.append(("cancel", idempotency_key, payment_id))
+        return payment_response(payment_id, "canceled")
 
     def find_deal(deal_id):
         calls.append(("find_deal", deal_id))
         return deal_response(deal_id=deal_id, status="opened")
 
-    monkeypatch.setattr("service.Deal.create", create_deal)
     monkeypatch.setattr("service.YooKassaPayment.create", create_payment)
     monkeypatch.setattr("service.YooKassaPayment.find_one", find_payment)
-    monkeypatch.setattr("service.YooKassaPayment.cancel", lambda payment_id, idempotency_key=None: payment_response(payment_id, "canceled"))
-    monkeypatch.setattr("service.Payout.create", create_payout)
+    monkeypatch.setattr("service.YooKassaPayment.cancel", cancel_payment)
     monkeypatch.setattr("service.YooKassaRefund.create", create_refund)
     monkeypatch.setattr("reads.Deal.find_one", find_deal)
     monkeypatch.setattr("reads.YooKassaPayment.find_one", find_payment)

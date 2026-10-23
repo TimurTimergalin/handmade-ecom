@@ -7,11 +7,11 @@ import { Search, Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { deleteProduct } from "@/services/api";
-import { ROUTES, SALE_MODE_LABELS, DELIVERY_LABELS } from "@/lib/constants";
+import { ROUTES, SALE_MODE_LABELS, DELIVERY_LABELS, saleAvailability } from "@/lib/constants";
 import { formatPrice, cn } from "@/lib/utils";
-import type { Product, SaleMode } from "@/types";
+import type { Product } from "@/types";
 
-type Filter = "all" | SaleMode;
+type Filter = "all" | "online" | "out_of_stock" | "deal_only";
 
 export function ProductsManager({ products }: { products: Product[] }) {
   const [query, setQuery] = useState("");
@@ -21,7 +21,7 @@ export function ProductsManager({ products }: { products: Product[] }) {
 
   const filtered = items.filter((p) => {
     const matchesQuery = p.title.toLowerCase().includes(query.toLowerCase());
-    const matchesFilter = filter === "all" || p.saleMode === filter;
+    const matchesFilter = filter === "all" || saleAvailability(p) === filter;
     return matchesQuery && matchesFilter;
   });
 
@@ -95,6 +95,18 @@ export function ProductsManager({ products }: { products: Product[] }) {
 
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{product.title}</div>
+                  {product.moderationStatus === "pending" && (
+                    <div className="text-xs text-amber-700">На модерации</div>
+                  )}
+                  {product.moderationStatus === "rejected" && (
+                    <div className="text-xs text-red-700">Отклонён</div>
+                  )}
+                  {product.draftStatus === "pending" && (
+                    <div className="text-xs text-amber-700">Изменения на модерации</div>
+                  )}
+                  {product.draftStatus === "rejected" && (
+                    <div className="text-xs text-red-700">Изменения отклонены</div>
+                  )}
                   <div className="text-muted-foreground text-xs">
                     {formatPrice(product.price)} ·{" "}
                     {product.availableDeliveries.map((d) => DELIVERY_LABELS[d]).join(" / ")}
@@ -106,12 +118,12 @@ export function ProductsManager({ products }: { products: Product[] }) {
                   <div
                     className={cn(
                       "mt-1 inline-block rounded-full px-2 py-0.5 font-medium",
-                      product.saleMode === "online" && "bg-green-100 text-green-800",
-                      product.saleMode === "out_of_stock" && "bg-red-100 text-red-800",
-                      product.saleMode === "deal_only" && "bg-purple-100 text-purple-800"
+                      saleAvailability(product) === "online" && "bg-green-100 text-green-800",
+                      saleAvailability(product) === "out_of_stock" && "bg-red-100 text-red-800",
+                      saleAvailability(product) === "deal_only" && "bg-purple-100 text-purple-800"
                     )}
                   >
-                    {SALE_MODE_LABELS[product.saleMode]}
+                    {SALE_MODE_LABELS[saleAvailability(product)]}
                   </div>
                 </div>
 

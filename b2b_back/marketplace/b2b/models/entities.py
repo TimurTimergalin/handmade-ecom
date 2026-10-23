@@ -33,11 +33,26 @@ class Store(Timestamps, Base):
     avatar: Mapped[str] = mapped_column(Text, default="")
     plan_tier: Mapped[str] = mapped_column(String(20), default="free")
     onboarding_status: Mapped[str] = mapped_column(String(20), default="pending")
+    rejection_reason: Mapped[str | None] = mapped_column(Text, default=None)
     payout_token: Mapped[str | None] = mapped_column(String(512), default=None)
     payout_card: Mapped[dict | None] = mapped_column(JSON, default=None)
+    yookassa_shop_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    legal_type: Mapped[str | None] = mapped_column(String(16), default=None)
+    last_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    first_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    patronymic: Mapped[str | None] = mapped_column(String(100), default=None)
+    legal_name: Mapped[str | None] = mapped_column(String(300), default=None)
+    inn: Mapped[str | None] = mapped_column(String(12), default=None)
+    ogrn: Mapped[str | None] = mapped_column(String(15), default=None)
+    legal_address: Mapped[str | None] = mapped_column(Text, default=None)
+    profile_draft: Mapped[dict | None] = mapped_column(JSON, default=None)
+    profile_status: Mapped[str | None] = mapped_column(String(16), default=None)
+    profile_rejection_reason: Mapped[str | None] = mapped_column(Text, default=None)
     __table_args__ = (
         CheckConstraint("plan_tier IN ('free','premium')", name="plan_tier"),
-        CheckConstraint("onboarding_status IN ('pending','active')", name="onboarding_status"),
+        CheckConstraint(
+            "onboarding_status IN ('pending','rejected','active')", name="onboarding_status"
+        ),
     )
 
 
@@ -47,6 +62,9 @@ class DeliverySettings(Base):
     pickup_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     cdek_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     pickup_points: Mapped[list] = mapped_column(JSON, default=list)
+    cdek_office_code: Mapped[str] = mapped_column(String(32), default="")
+    cdek_office_address: Mapped[str] = mapped_column(Text, default="")
+    cdek_ship_days: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Media(Timestamps, Base):
@@ -68,6 +86,10 @@ class Subscription(Timestamps, Base):
     status: Mapped[str] = mapped_column(String(30), default="free")
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     online_payments: Mapped[bool] = mapped_column(Boolean, default=False)
+    payment_method_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    auto_renew: Mapped[bool] = mapped_column(Boolean, default=False)
+    renewal_task_id: Mapped[UUID | None] = mapped_column(Uuid, default=None)
+    renewal_registered: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 define_tables(Base.metadata)

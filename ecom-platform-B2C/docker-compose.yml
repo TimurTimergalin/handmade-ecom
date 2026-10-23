@@ -9,6 +9,9 @@ x-service-base: &service-base
     KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
     AUTH_DEV_MODE: ${AUTH_DEV_MODE:-true}
     AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-changeme}
+    CDEK_API_URL: ${CDEK_API_URL:-https://api.edu.cdek.ru/v2}
+    CDEK_CLIENT_ID: ${CDEK_CLIENT_ID:-}
+    CDEK_CLIENT_SECRET: ${CDEK_CLIENT_SECRET:-}
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
     interval: 10s
@@ -145,12 +148,16 @@ services:
       B2C_CART_URL: http://cart:8000
       B2C_ORDERS_URL: http://orders:8000
       B2C_GOODS_URL: http://goods:8000
+      B2C_B2B_GOODS_URL: http://b2b-goods:8000/api
       B2C_SEARCH_URL: http://search:8000
       B2C_EVENTER_URL: http://eventer:8000
       B2C_GORSE_URL: http://gorse:8088
       B2C_GORSE_API_KEY: ${GORSE_API_KEY:-gorseApiKeyForLocalDevOnly}
       B2C_UPSTREAM_TIMEOUT_SECONDS: ${B2C_UPSTREAM_TIMEOUT_SECONDS:-2.0}
       B2C_UPSTREAM_RETRIES: ${B2C_UPSTREAM_RETRIES:-2}
+      AUTH_ACCESS_TTL_SECONDS: ${AUTH_ACCESS_TTL_SECONDS:-900}
+      AUTH_REFRESH_TTL_SECONDS: ${AUTH_REFRESH_TTL_SECONDS:-2592000}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
     depends_on:
       users:
         condition: service_started
@@ -221,6 +228,8 @@ services:
       <<: *service-env
       SERVICE_NAME: orders
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-ecom}:${POSTGRES_PASSWORD:-ecom}@postgres:5432/ecom_orders
+      B2B_URL: ${B2B_URL:-http://b2b:8000/api}
+      SERVICE_KEY: ${SERVICE_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

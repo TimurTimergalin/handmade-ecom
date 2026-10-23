@@ -87,6 +87,32 @@ class Upstreams:
             raise
         return data["user"]
 
+    async def issue_refresh(self, user_id: uuid.UUID) -> str:
+        data = await self._request(
+            "POST",
+            self._settings.users_url,
+            "/api/v1/auth/sessions",
+            json={"user_id": str(user_id)},
+        )
+        return str(data["refreshToken"])
+
+    async def rotate_refresh(self, refresh_token: str) -> tuple[uuid.UUID, str]:
+        data = await self._request(
+            "POST",
+            self._settings.users_url,
+            "/api/v1/auth/refresh",
+            json={"refresh_token": refresh_token},
+        )
+        return uuid.UUID(str(data["userId"])), str(data["refreshToken"])
+
+    async def revoke_refresh(self, refresh_token: str) -> None:
+        await self._request(
+            "POST",
+            self._settings.users_url,
+            "/api/v1/auth/logout",
+            json={"refresh_token": refresh_token},
+        )
+
     async def login_yandex(self, payload: dict) -> dict:
         data = await self._request(
             "POST",
@@ -116,8 +142,6 @@ class Upstreams:
             body["display_name"] = payload["displayName"]
         if "bio" in payload:
             body["bio"] = payload["bio"]
-        if "avatar" in payload:
-            body["avatar"] = payload["avatar"]
         data = await self._request(
             "PATCH",
             self._settings.users_url,
@@ -383,7 +407,8 @@ class Upstreams:
         data = await self._request("GET", self._settings.orders_url, "/api/v1/delivery-options")
         return list(data) if isinstance(data, list) else list(data.get("items") or [])
 
-    async def seller_payout_token(self, seller_id: uuid.UUID) -> str | None:
+    async def seller_yookassa_shop_id(self, seller_id: uuid.UUID) -> str | None:
+        """Shop id from the B2B payout-token endpoint (field yookassaShopId)."""
         base = self._settings.b2b_url.strip().rstrip("/")
         key = self._settings.service_key.strip()
         if not base or not key:
@@ -401,12 +426,75 @@ class Upstreams:
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict):
             return None
-        token = data.get("payoutToken") or data.get("payout_token")
-        text = str(token).strip() if token else ""
+        shop_id = data.get("yookassaShopId") or data.get("yookassa_shop_id")
+        if shop_id is None:
+            return None
+        text = str(shop_id).strip()
         return text or None
+
+    async def adjust_catalog_stock(self, product_id: uuid.UUID, delta: int) -> int:
+        base = self._settings.b2b_goods_url.strip().rstrip("/")
+        key = self._settings.service_key.strip()
+        if not base or not key:
+            raise UpstreamUnavailableError(base or "b2b-goods")
+        data = await self._once(
+            base,
+            f"/internal/products/{product_id}/stock",
+            delta,
+            {"X-Service-Key": key},
+        )
+        payload = data.get("data") if isinstance(data, dict) else None
+        stock = payload.get("inStock") if isinstance(payload, dict) else None
+        return int(stock or 0)
+
+    async def adjust_storefront_stock(self, product_id: uuid.UUID, delta: int) -> int:
+        data = await self._once(
+            self._settings.goods_url,
+            f"/api/v1/internal/goods/{product_id}/stock",
+            delta,
+            None,
+        )
+        return int(data.get("stock") or 0) if isinstance(data, dict) else 0
+
+    async def _once(
+        self, base: str, path: str, delta: int, headers: dict[str, str] | None
+    ) -> Any:
+        try:
+            response = await self._client.post(
+                f"{base.rstrip('/')}{path}",
+                json={"delta": delta},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise UpstreamUnavailableError(base, details={"error": str(exc)}) from exc
+        if response.status_code == 409:
+            raise conflict(_upstream_message(response, "Недостаточно на складе"))
+        if response.status_code == 404:
+            raise NotFoundError(_upstream_message(response, "Не найдено"))
+        if response.status_code >= 400:
+            response.raise_for_status()
+        return response.json()
 
     async def create_order(self, payload: dict) -> dict:
         return await self._request("POST", self._settings.orders_url, "/api/v1/orders", json=payload)
+
+    async def create_checkout(self, payload: dict) -> dict:
+        return await self._request(
+            "POST", self._settings.orders_url, "/api/v1/checkouts", json=payload
+        )
+
+    async def cancel_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+        return await self._request(
+            "POST",
+            self._settings.orders_url,
+            f"/api/v1/orders/{order_id}/cancel",
+            params={"user_id": str(user_id)},
+        )
+
+    async def repay_order(self, order_id: uuid.UUID) -> dict:
+        return await self._request(
+            "POST", self._settings.orders_url, f"/api/v1/orders/{order_id}/repay"
+        )
 
     async def list_orders(self, user_id: uuid.UUID, page: int = 1, limit: int = 20) -> dict:
         return await self._request(
@@ -418,6 +506,17 @@ class Upstreams:
 
     async def get_order(self, order_id: uuid.UUID) -> dict:
         return await self._request("GET", self._settings.orders_url, f"/api/v1/orders/{order_id}")
+
+    async def admin_orders(self) -> list:
+        return await self._request("GET", self._settings.orders_url, "/api/v1/admin/orders")
+
+    async def set_status_override(self, order_id: uuid.UUID, status: str | None) -> dict:
+        return await self._request(
+            "PATCH",
+            self._settings.orders_url,
+            f"/api/v1/admin/orders/{order_id}",
+            json={"status": status},
+        )
 
     async def receive_order(
         self, order_id: uuid.UUID, user_id: uuid.UUID, receival_code: str

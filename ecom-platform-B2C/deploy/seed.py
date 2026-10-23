@@ -209,8 +209,8 @@ async def seed_users(conn: asyncpg.Connection) -> None:
     )
 
 
-def _pickup_point(city: str | None) -> list[dict[str, str]]:
-    return [{"city": city or "Москва", "address": "Пункт выдачи"}]
+def _pickup_point(city: str | None, max_days: int = 2) -> list[dict[str, str | int]]:
+    return [{"city": city or "Москва", "address": "Пункт выдачи", "maxDays": max_days}]
 
 
 async def _fill_empty_pickup_points(
@@ -236,7 +236,7 @@ async def _fill_empty_pickup_points(
               AND {empty}
             """,
             seller_id,
-            json.dumps(_pickup_point(city), ensure_ascii=False),
+            json.dumps(_pickup_point(city, 2), ensure_ascii=False),
         )
     await conn.execute(
         f"""
@@ -244,7 +244,7 @@ async def _fill_empty_pickup_points(
         SET pickup_points = $1::jsonb
         WHERE {empty}
         """,
-        json.dumps(_pickup_point("Москва"), ensure_ascii=False),
+        json.dumps(_pickup_point("Москва", 2), ensure_ascii=False),
     )
 
 
@@ -333,6 +333,10 @@ async def seed_goods(
         ALTER TABLE products ADD COLUMN IF NOT EXISTS available_deliveries JSONB NOT NULL DEFAULT '["pickup","cdek"]'::jsonb;
         ALTER TABLE products ADD COLUMN IF NOT EXISTS pickup_points JSONB;
         ALTER TABLE products ADD COLUMN IF NOT EXISTS deal_contacts TEXT;
+        ALTER TABLE products ADD COLUMN IF NOT EXISTS cdek_ship_days JSONB NOT NULL DEFAULT '[]'::jsonb;
+        UPDATE products SET cdek_ship_days = '[0, 2, 4]'::jsonb
+            WHERE available_deliveries @> '["cdek"]'::jsonb
+              AND (cdek_ship_days IS NULL OR cdek_ship_days = '[]'::jsonb);
         ALTER TABLE products ALTER COLUMN attributes SET DEFAULT '[]'::jsonb;
         UPDATE products SET attributes = '[]'::jsonb WHERE attributes IS NULL;
         UPDATE products SET available_deliveries = '["pickup","cdek"]'::jsonb
@@ -381,7 +385,7 @@ async def seed_goods(
         tags = ["handmade", "demo"]
         attributes: list = []
         deliveries = ["pickup", "cdek"]
-        pickup_points = _pickup_point(seller_cities.get(seller_id))
+        pickup_points = _pickup_point(seller_cities.get(seller_id), (idx % 5) + 1)
         await conn.execute(
             """
             INSERT INTO products (
@@ -442,6 +446,13 @@ async def seed_goods(
                 "created_at": NOW.isoformat(),
             }
         )
+    await conn.execute(
+        """
+        UPDATE products SET cdek_ship_days = '[0, 2, 4]'::jsonb
+        WHERE available_deliveries @> '["cdek"]'::jsonb
+          AND (cdek_ship_days IS NULL OR cdek_ship_days = '[]'::jsonb)
+        """
+    )
     await _fill_empty_pickup_points(conn, seller_cities)
     await _replace_example_product_images(conn)
     return docs
@@ -676,6 +687,8 @@ async def seed_orders(conn: asyncpg.Connection) -> None:
             recipient_phone VARCHAR(32) NOT NULL DEFAULT '',
             payment_method VARCHAR(32) NOT NULL DEFAULT 'card',
             comment TEXT,
+            cdek_office_code VARCHAR(64),
+            cdek_order_uuid VARCHAR(64),
             paid_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

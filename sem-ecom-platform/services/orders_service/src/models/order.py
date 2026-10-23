@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Index, Numeric, String, desc
+from sqlalchemy import ForeignKey, Index, Numeric, String, desc
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base, created_at_column, updated_at_column
@@ -15,9 +15,11 @@ class Order(Base):
     creation_idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
     deal_idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
     payout_idempotency_key: Mapped[str] = mapped_column(String(64), unique=True)
-    payout_token: Mapped[str] = mapped_column(String(512))
+    payout_token: Mapped[str | None] = mapped_column(String(512))
     user_id: Mapped[str] = mapped_column(String(36))
     seller_id: Mapped[str] = mapped_column(String(36), index=True)
+    multi_order_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("multi_orders.id"), index=True)
+    yookassa_account_id: Mapped[str | None] = mapped_column(String(128))
     delivery_type: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(64))
     receival_code: Mapped[str | None] = mapped_column(String(6))

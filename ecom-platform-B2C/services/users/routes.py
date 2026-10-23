@@ -15,6 +15,7 @@ from common.app import ConflictError, NotFoundError, UnauthorizedError
 from common.db import Database
 from dto import seller_to_dto, user_to_dto
 from models import Address, Seller, Subscription, User
+import refresh_sessions
 
 router = APIRouter(prefix="/api/v1")
 _db: Database | None = None
@@ -71,7 +72,6 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     phone: str | None = None
-    avatar: str | None = None
     bio: str | None = None
     is_active: bool | None = None
 
@@ -86,6 +86,7 @@ class YandexLoginIn(BaseModel):
     email: EmailStr
     display_name: str = Field(min_length=1, max_length=200)
     login: str = Field(default="", max_length=64)
+    phone: str | None = Field(default=None, max_length=32)
 
 
 class SellerBatchRequest(BaseModel):
@@ -151,10 +152,18 @@ def _username_base(login: str) -> str:
     return cleaned or "yandex"
 
 
+def _stored_phone(phone: str | None) -> str | None:
+    cleaned = (phone or "").strip()
+    return cleaned[:32] or None
+
+
 @router.post("/auth/yandex", tags=["auth"])
 async def login_yandex(payload: YandexLoginIn, session: SessionDep) -> dict:
+    phone = _stored_phone(payload.phone)
     by_yandex = await session.scalar(select(User).where(User.yandex_id == payload.yandex_id))
     if by_yandex is not None:
+        by_yandex.phone = phone
+        await session.flush()
         return {"user": user_to_dto(by_yandex)}
 
     email = str(payload.email).lower()
@@ -163,6 +172,7 @@ async def login_yandex(payload: YandexLoginIn, session: SessionDep) -> dict:
         if by_email.yandex_id and by_email.yandex_id != payload.yandex_id:
             raise ConflictError("Эта почта уже привязана к другому аккаунту")
         by_email.yandex_id = payload.yandex_id
+        by_email.phone = phone
         await session.flush()
         return {"user": user_to_dto(by_email)}
 
@@ -182,6 +192,7 @@ async def login_yandex(payload: YandexLoginIn, session: SessionDep) -> dict:
         display_name=payload.display_name,
         password_hash=None,
         yandex_id=payload.yandex_id,
+        phone=phone,
         roles=["buyer"],
     )
     session.add(user)
@@ -212,8 +223,6 @@ async def update_user(user_id: uuid.UUID, payload: UserUpdate, session: SessionD
         user.display_name = data["display_name"]
     if "phone" in data:
         user.phone = data["phone"]
-    if "avatar" in data:
-        user.avatar = data["avatar"]
     if "bio" in data:
         user.bio = data["bio"]
     if "is_active" in data:
@@ -423,3 +432,30 @@ async def list_addresses(user_id: uuid.UUID, session: SessionDep) -> list[dict]:
         }
         for a in rows.all()
     ]
+
+
+class RefreshIssueIn(BaseModel):
+    user_id: uuid.UUID
+
+
+class RefreshRawIn(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+@router.post("/auth/sessions", tags=["auth"])
+async def issue_refresh(payload: RefreshIssueIn, session: SessionDep) -> dict:
+    await _user(session, payload.user_id)
+    token = await refresh_sessions.issue(session, payload.user_id)
+    return {"refreshToken": token}
+
+
+@router.post("/auth/refresh", tags=["auth"])
+async def rotate_refresh(payload: RefreshRawIn, session: SessionDep) -> dict:
+    user_id, token = await refresh_sessions.rotate(session, payload.refresh_token)
+    return {"userId": str(user_id), "refreshToken": token}
+
+
+@router.post("/auth/logout", tags=["auth"])
+async def logout_refresh(payload: RefreshRawIn, session: SessionDep) -> Response:
+    await refresh_sessions.revoke(session, payload.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -22,6 +22,7 @@ services:
     <<: *dev
     volumes:
       - ./services/b2c:/app/services/b2c
+      - ./services/cdek:/app/services/cdek
       - ./libs/common:/app/libs/common
 
   users:
@@ -46,6 +47,7 @@ services:
     <<: *dev
     volumes:
       - ./services/orders:/app/services/orders
+      - ./services/cdek:/app/services/cdek
       - ./libs/common:/app/libs/common
 
   goods:

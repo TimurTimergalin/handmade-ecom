@@ -1,31 +1,33 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { toast } from "sonner";
 
 import { useCartStore } from "@/store/cart";
+import { ensureBuyer } from "@/store/login-prompt";
 import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
-import type { DeliveryMethod } from "@/types";
 
 export function BuyNowButton({
   productId,
-  delivery,
   disabled,
   className,
+  addIfMissing = true,
+  children = "Купить сейчас",
 }: {
   productId: string;
-  delivery: DeliveryMethod;
   disabled?: boolean;
   className?: string;
+  addIfMissing?: boolean;
+  children?: React.ReactNode;
 }) {
   const router = useRouter();
   const addItem = useCartStore((s) => s.addItem);
 
-  function handleClick() {
-    if (disabled) return;
-    addItem(productId, delivery);
-    toast.success("Товар добавлен. Переходим к оформлению...");
+  function handleClick(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (disabled || !ensureBuyer()) return;
+    if (addIfMissing) addItem(productId);
     router.push(ROUTES.checkout);
   }
 
@@ -42,7 +44,7 @@ export function BuyNowButton({
         className
       )}
     >
-      Купить сейчас
+      {children}
     </button>
   );
 }

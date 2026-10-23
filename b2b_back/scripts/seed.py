@@ -63,14 +63,18 @@ async def seed(base_url: str):
                         "/products",
                         json={
                             "title": title,
-                            "image": image,
+                            "images": [image, image],
                             "price": n * 600,
                             "inStock": n,
                             "saleMode": "deal_only",
                             "dealContacts": "Свяжитесь с мастерской для оформления заказа",
                             "availableDeliveries": ["pickup"],
                             "pickupPoints": [
-                                {"city": "Москва", "address": "Демонстрационный адрес, 1"}
+                                {
+                                    "city": "Москва",
+                                    "address": "Демонстрационный адрес, 1",
+                                    "maxDays": n + 1,
+                                }
                             ],
                         },
                     )
@@ -99,8 +103,14 @@ async def seed(base_url: str):
                 "/seller/delivery",
                 json={
                     "pickupEnabled": True,
-                    "pickupPoints": [{"city": "Москва", "address": "Демонстрационный адрес, 1"}],
-                    "cdekEnabled": True,
+                    "pickupPoints": [
+                        {
+                            "city": "Москва",
+                            "address": "Демонстрационный адрес, 1",
+                            "maxDays": 3,
+                        }
+                    ],
+                    "cdekEnabled": False,
                 },
             )
         )

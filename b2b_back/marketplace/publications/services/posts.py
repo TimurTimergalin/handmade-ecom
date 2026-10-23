@@ -60,6 +60,10 @@ class PostsService:
             published_at=post.published_at,
             created_at=post.created_at,
             updated_at=post.updated_at,
+            moderation_status=post.moderation_status,
+            draft_status=post.draft_status,
+            rejection_reason=post.rejection_reason,
+            draft=post.draft,
         ).model_dump(mode="json", by_alias=True)
 
     async def validate(self, seller_id, payload, old_ids=()):
@@ -94,27 +98,20 @@ class PostsService:
                 403, "QUOTA_EXCEEDED", "Достигнут лимит публикаций", {"limit": policy.post_limit}
             )
         payload = await self.validate(seller_id, payload)
+        submitted = payload.status == "published"
+        stored = payload.model_dump(exclude={"product_ids"}, mode="json")
+        if submitted:
+            stored["status"] = "draft"
         obj = Post(
             seller_id=seller_id,
-            **payload.model_dump(exclude={"product_ids"}, mode="json"),
-            published_at=utcnow() if payload.status == "published" else None,
+            moderation_status="pending" if submitted else None,
+            **stored,
         )
         obj.links = [
             PostProduct(product_id=p, position=n) for n, p in enumerate(payload.product_ids)
         ]
         self.db.add(obj)
         await self.db.flush()
-        if obj.status == "published":
-            await enqueue(
-                self.db,
-                "publication.published",
-                obj.id,
-                {
-                    "publicationId": obj.id,
-                    "sellerId": seller_id,
-                    "status": "published",
-                },
-            )
         return self.serialize(obj)
 
     async def update(self, seller_id, post_id, patch):
@@ -139,40 +136,149 @@ class PostsService:
             and await self.repo.count(seller_id) > policy.post_limit
         ):
             raise DomainError(403, "QUOTA_EXCEEDED", "Превышен лимит публикаций после смены тарифа")
+        live = previous_status == "published" and obj.moderation_status == "active"
+        if live:
+            if changed:
+                draft = payload.model_dump(mode="json", by_alias=True)
+                if draft == self._live_draft(obj):
+                    obj.draft = None
+                    obj.draft_status = None
+                    obj.rejection_reason = None
+                else:
+                    obj.draft = draft
+                    obj.draft_status = "pending"
+                    obj.rejection_reason = None
+            await self.db.flush()
+            return self.serialize(obj)
         for key, value in payload.model_dump(exclude={"product_ids"}, mode="json").items():
             setattr(obj, key, value)
-        if payload.status == "published" and obj.published_at is None:
-            obj.published_at = utcnow()
-        # Flush deletions before reinsertion to avoid unique(position) conflicts on reorder.
+        if payload.status == "published":
+            obj.status = "draft"
+            obj.moderation_status = "pending"
+            obj.rejection_reason = None
+            obj.published_at = None
         obj.links.clear()
         await self.db.flush()
         obj.links.extend(
             PostProduct(product_id=p, position=n) for n, p in enumerate(payload.product_ids)
         )
         await self.db.flush()
-        if previous_status != "published" and obj.status == "published":
+        return self.serialize(obj)
+
+    def _live_draft(self, obj) -> dict:
+        data = self.serialize(obj)
+        return {key: data[PostCreate.model_fields[key].alias or key] for key in PostCreate.model_fields}
+
+    async def pending_moderation(self):
+        rows = (
+            await self.db.scalars(
+                select(Post)
+                .where(
+                    Post.deleted_at.is_(None),
+                    (Post.moderation_status == "pending") | (Post.draft_status == "pending"),
+                )
+                .order_by(Post.created_at.asc())
+            )
+        ).all()
+        return [self._card(row) for row in rows]
+
+    def _card(self, obj) -> dict:
+        return {
+            "id": str(obj.id),
+            "sellerId": str(obj.seller_id),
+            "title": obj.title,
+            "summary": obj.summary or "",
+            "body": obj.body or "",
+            "coverImage": obj.cover_image,
+            "moderationStatus": obj.moderation_status,
+            "draftStatus": obj.draft_status,
+            "rejectionReason": obj.rejection_reason,
+            "draft": obj.draft,
+        }
+
+    async def accept_moderation(self, post_id):
+        obj = await self.db.scalar(
+            select(Post).where(Post.id == post_id, Post.deleted_at.is_(None)).with_for_update()
+        )
+        if obj is None:
+            from marketplace.shared.errors import missing
+
+            missing("Публикация не найдена")
+        if obj.moderation_status == "pending":
+            obj.status = "published"
+            obj.moderation_status = "active"
+            obj.published_at = utcnow()
+            obj.rejection_reason = None
+            await self.db.flush()
             await enqueue(
                 self.db,
                 "publication.published",
                 obj.id,
-                {
-                    "publicationId": obj.id,
-                    "sellerId": seller_id,
-                    "status": "published",
-                },
+                {"publicationId": obj.id, "sellerId": obj.seller_id, "status": "published"},
             )
-        elif changed:
-            await enqueue(
-                self.db,
-                "publication.updated",
-                obj.id,
-                {
-                    "publicationId": obj.id,
-                    "sellerId": seller_id,
-                    "status": obj.status,
-                    "changedFields": sorted(changed),
-                },
+        elif obj.draft_status == "pending" and obj.draft:
+            payload = PostCreate.model_validate(obj.draft)
+            live = self._live_draft(obj)
+            incoming = payload.model_dump(mode="json", by_alias=True)
+            changed = sorted(
+                key for key, value in incoming.items() if live.get(key) != value
             )
+            for key, value in payload.model_dump(exclude={"product_ids"}, mode="json").items():
+                if key != "status":
+                    setattr(obj, key, value)
+            obj.links.clear()
+            await self.db.flush()
+            obj.links.extend(
+                PostProduct(product_id=p, position=n) for n, p in enumerate(payload.product_ids)
+            )
+            obj.draft = None
+            obj.draft_status = None
+            obj.rejection_reason = None
+            await self.db.flush()
+            if changed:
+                await enqueue(
+                    self.db,
+                    "publication.updated",
+                    obj.id,
+                    {
+                        "publicationId": obj.id,
+                        "sellerId": obj.seller_id,
+                        "status": obj.status,
+                        "changedFields": changed,
+                    },
+                )
+        else:
+            invalid("Публикацию нельзя принять")
+        return self._card(obj)
+
+    async def reject_moderation(self, post_id, reason: str):
+        obj = await self.db.scalar(
+            select(Post).where(Post.id == post_id, Post.deleted_at.is_(None)).with_for_update()
+        )
+        if obj is None:
+            from marketplace.shared.errors import missing
+
+            missing("Публикация не найдена")
+        reason = reason.strip()
+        if obj.moderation_status == "pending":
+            obj.moderation_status = "rejected"
+            obj.status = "draft"
+            obj.rejection_reason = reason
+        elif obj.draft_status == "pending":
+            obj.draft_status = "rejected"
+            obj.rejection_reason = reason
+        else:
+            invalid("Публикацию нельзя отклонить")
+        await self.db.flush()
+        return self._card(obj)
+
+    async def discard_draft(self, seller_id, post_id):
+        obj = await self.repo.get(seller_id, post_id, True)
+        obj.draft = None
+        obj.draft_status = None
+        if obj.moderation_status == "active":
+            obj.rejection_reason = None
+        await self.db.flush()
         return self.serialize(obj)
 
     async def get(self, seller_id, post_id):
@@ -205,7 +311,11 @@ class PostsService:
     async def read_published(self, page, page_size, q, seller_id=None):
         query = (
             select(Post)
-            .where(Post.status == "published", Post.deleted_at.is_(None))
+            .where(
+                Post.status == "published",
+                Post.moderation_status == "active",
+                Post.deleted_at.is_(None),
+            )
             .order_by(Post.published_at.desc(), Post.id)
         )
         if seller_id:
@@ -218,7 +328,10 @@ class PostsService:
     async def read_one(self, post_id):
         obj = await self.db.scalar(
             select(Post).where(
-                Post.id == post_id, Post.status == "published", Post.deleted_at.is_(None)
+                Post.id == post_id,
+                Post.status == "published",
+                Post.moderation_status == "active",
+                Post.deleted_at.is_(None),
             )
         )
         if obj is None:

@@ -15,6 +15,7 @@ export function SellerOrderDetail({ order }: { order: Order }) {
   const router = useRouter();
   const [current, setCurrent] = useState(order);
   const [receivalCode, setReceivalCode] = useState("");
+  const [codeError, setCodeError] = useState("");
   const [isUpdating, setIsUpdating] = useState(false);
 
   useEffect(() => {
@@ -22,10 +23,11 @@ export function SellerOrderDetail({ order }: { order: Order }) {
   }, [order]);
 
   async function changeStatus(newStatus: OrderStatus, trackingNumber?: string) {
-    if (newStatus === "delivered" && !/^\d{6}$/.test(trackingNumber ?? "")) {
-      toast.error("Введите код из 6 цифр");
+    if (newStatus === "completed" && !/^\d{6}$/.test(trackingNumber ?? "")) {
+      setCodeError("Введите код из 6 цифр");
       return;
     }
+    if (newStatus === "completed") setCodeError("");
 
     setIsUpdating(true);
     try {
@@ -42,16 +44,29 @@ export function SellerOrderDetail({ order }: { order: Order }) {
         items: updated.items?.some((item) => item.product) ? updated.items : prev.items,
         trackingNumber: updated.trackingNumber ?? trackingNumber ?? prev.trackingNumber,
       }));
+      setCodeError("");
       toast.success(`Статус изменён на «${ORDER_STATUS_LABELS[newStatus]}»`);
       router.refresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось изменить статус");
+      const message = error instanceof Error ? error.message : "Не удалось изменить статус";
+      if (newStatus === "completed") {
+        setCodeError(
+          message === "Неверный код выдачи" || message === "Зависимый сервис отклонил запрос"
+            ? "Неверный код. Попросите покупателя ещё раз назвать код из деталей заказа."
+            : message
+        );
+      } else {
+        toast.error(message);
+      }
     } finally {
       setIsUpdating(false);
     }
   }
 
-  const isFinal = current.status === "delivered" || current.status === "cancelled";
+  const isFinal =
+    current.status === "completed" ||
+    current.status === "cancelled" ||
+    (current.status === "delivered" && current.delivery !== "pickup");
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
@@ -64,8 +79,10 @@ export function SellerOrderDetail({ order }: { order: Order }) {
           className={cn(
             "rounded-full px-3 py-1.5 text-xs font-medium",
             current.status === "delivered" && "bg-green-100 text-green-800",
+            current.status === "completed" && "bg-green-100 text-green-800",
             current.status === "cancelled" && "bg-red-100 text-red-800",
             current.status === "shipped" && "bg-blue-100 text-blue-800",
+            current.status === "delivering" && "bg-blue-100 text-blue-800",
             (current.status === "paid" || current.status === "created") &&
               "bg-amber-100 text-amber-800"
           )}
@@ -73,14 +90,6 @@ export function SellerOrderDetail({ order }: { order: Order }) {
           {ORDER_STATUS_LABELS[current.status]}
         </span>
       </div>
-
-      <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
-        <h2 className="font-semibold">Покупатель</h2>
-        <div className="text-sm">
-          {current.buyer?.displayName ?? "Покупатель"}
-          {current.buyer?.email ? ` · ${current.buyer.email}` : ""}
-        </div>
-      </section>
 
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
         <h2 className="font-semibold">Доставка</h2>
@@ -97,9 +106,9 @@ export function SellerOrderDetail({ order }: { order: Order }) {
             {current.pickupPoint.city}, {current.pickupPoint.address}
           </div>
         )}
-        {current.trackingNumber && (
+        {current.trackingNumber && current.delivery === "cdek" && (
           <div className="bg-muted/40 rounded-lg px-3 py-2">
-            <div className="text-muted-foreground text-xs">Код выдачи</div>
+            <div className="text-muted-foreground text-xs">Трек-номер</div>
             <div className="font-mono text-lg tracking-widest">{current.trackingNumber}</div>
           </div>
         )}
@@ -146,37 +155,48 @@ export function SellerOrderDetail({ order }: { order: Order }) {
         <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
           <h2 className="font-semibold">Действия</h2>
           <div className="flex flex-wrap gap-2">
-            {current.status === "paid" && (
+            {current.delivery === "pickup" && current.status === "paid" && (
               <button
                 type="button"
                 disabled={isUpdating}
-                onClick={() => changeStatus("shipped")}
+                onClick={() => changeStatus("delivered")}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
               >
-                Отметить как отправленный
+                Готов к выдаче
               </button>
             )}
-            {current.status === "shipped" && (
-              <div className="flex flex-wrap items-end gap-2">
-                <label className="flex flex-col gap-1">
-                  <span className="text-muted-foreground text-xs">Код из 6 цифр</span>
-                  <input
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={receivalCode}
-                    onChange={(e) => setReceivalCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    placeholder="000000"
-                    className="bg-background w-32 rounded-md border px-3 py-2 font-mono text-sm outline-none"
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={isUpdating || !/^\d{6}$/.test(receivalCode)}
-                  onClick={() => changeStatus("delivered", receivalCode)}
-                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60"
-                >
-                  Отметить как доставленный
-                </button>
+            {current.delivery === "pickup" &&
+              (current.status === "delivered" || current.status === "shipped") && (
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-muted-foreground text-xs">Код, который назвал покупатель</span>
+                    <input
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={receivalCode}
+                      aria-invalid={Boolean(codeError)}
+                      onChange={(e) => {
+                        setReceivalCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                        setCodeError("");
+                      }}
+                      placeholder="000000"
+                      className={cn(
+                        "bg-background w-32 rounded-md border px-3 py-2 font-mono text-sm outline-none",
+                        codeError && "border-destructive"
+                      )}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={isUpdating || !/^\d{6}$/.test(receivalCode)}
+                    onClick={() => changeStatus("completed", receivalCode)}
+                    className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60"
+                  >
+                    Подтвердить получение
+                  </button>
+                </div>
+                {codeError ? <p className="text-destructive text-sm">{codeError}</p> : null}
               </div>
             )}
             {(current.status === "created" || current.status === "paid") && (

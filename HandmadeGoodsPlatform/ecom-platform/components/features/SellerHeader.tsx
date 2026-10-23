@@ -5,7 +5,13 @@ import { FollowButton } from "./FollowButton";
 import { ROUTES } from "@/lib/constants";
 import type { Seller } from "@/types";
 
-export function SellerHeader({ seller }: { seller: Seller }) {
+export function SellerHeader({
+  seller,
+  showFollow = true,
+}: {
+  seller: Seller;
+  showFollow?: boolean;
+}) {
   return (
     <div className="flex items-center gap-3">
       <Link href={ROUTES.sellerPublic(seller.username)} className="shrink-0">
@@ -28,13 +34,15 @@ export function SellerHeader({ seller }: { seller: Seller }) {
         <span className="text-muted-foreground truncate text-xs">@{seller.username}</span>
       </div>
 
-      <div className="ml-auto">
-        <FollowButton
-          sellerId={seller.id}
-          initialIsFollowing={seller.isFollowing}
-          followersCount={seller.followersCount}
-        />
-      </div>
+      {showFollow && (
+        <div className="ml-auto">
+          <FollowButton
+            sellerId={seller.id}
+            initialIsFollowing={seller.isFollowing}
+            followersCount={seller.followersCount}
+          />
+        </div>
+      )}
     </div>
   );
 }

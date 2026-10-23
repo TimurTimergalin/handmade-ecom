@@ -3,18 +3,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import DOMPurify from "isomorphic-dompurify";
 
-import { PostDiscussion } from "@/components/features/PostDiscussion";
 import { ProductSnippet } from "@/components/features/ProductSnippet";
 import { SellerHeader } from "@/components/features/SellerHeader";
-import { getPost, getPostComments } from "@/services/api";
+import { getPost } from "@/services/api";
 import { timeAgo } from "@/lib/utils";
 
 export default async function PostPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const post = await getPost(id);
   if (!post) notFound();
-
-  const comments = await getPostComments(id).catch(() => []);
 
   return (
     <div className="container mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6">
@@ -52,13 +49,6 @@ export default async function PostPage({ params }: { params: Promise<{ id: strin
           </div>
         ) : null}
       </article>
-
-      <PostDiscussion
-        postId={post.id}
-        initialLiked={post.isLiked}
-        initialLikes={post.likesCount}
-        initialComments={comments}
-      />
     </div>
   );
 }

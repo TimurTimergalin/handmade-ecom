@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Index, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -67,6 +68,14 @@ class Seller(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     products_count: Mapped[int] = mapped_column(default=0)
     posts_count: Mapped[int] = mapped_column(default=0)
     is_verified: Mapped[bool] = mapped_column(default=False)
+    legal_type: Mapped[str | None] = mapped_column(String(16), default=None)
+    last_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    first_name: Mapped[str | None] = mapped_column(String(100), default=None)
+    patronymic: Mapped[str | None] = mapped_column(String(100), default=None)
+    legal_name: Mapped[str | None] = mapped_column(String(300), default=None)
+    inn: Mapped[str | None] = mapped_column(String(12), default=None)
+    ogrn: Mapped[str | None] = mapped_column(String(15), default=None)
+    legal_address: Mapped[str | None] = mapped_column(Text, default=None)
 
     user: Mapped[User | None] = relationship(back_populates="seller_profile")
 
@@ -83,3 +92,17 @@ class Subscription(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     seller_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True))
     notifications_enabled: Mapped[bool] = mapped_column(default=True)
+
+
+class RefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Одноразовый refresh. successor хранит следующий токен только на короткое окно гонки."""
+
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    successor: Mapped[str | None] = mapped_column(Text, default=None)

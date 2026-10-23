@@ -2,7 +2,8 @@ import axios, { type AxiosResponse, type InternalAxiosRequestConfig } from "axio
 
 import type { ApiResponse } from "@/types";
 
-const b2cBase = process.env.NEXT_PUBLIC_B2C_URL || "http://localhost:8080";
+export const b2cOrigin = process.env.NEXT_PUBLIC_B2C_URL || "http://localhost:8080";
+const b2cBase = b2cOrigin;
 const b2bBase = process.env.NEXT_PUBLIC_B2B_URL || "http://localhost:8090";
 
 export class HttpError extends Error {
@@ -41,21 +42,66 @@ function withSession(client: ReturnType<typeof axios.create>) {
   return client;
 }
 
-export const b2c = withSession(
-  axios.create({
-    baseURL: b2cBase,
-    withCredentials: true,
-  })
+const refreshClient = axios.create({
+  baseURL: b2cBase,
+  withCredentials: true,
+});
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+function refreshSession(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshClient
+      .post("/api/auth/refresh")
+      .then(() => true)
+      .catch(() => false)
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+function retryAfterRefresh(client: ReturnType<typeof axios.create>) {
+  client.interceptors.response.use(
+    (response) => response,
+    async (error) => {
+      const config = error.config as (InternalAxiosRequestConfig & { retried?: boolean }) | undefined;
+      const url = config?.url ?? "";
+      const isAuthCall = ["/api/auth/login", "/api/auth/refresh", "/api/auth/register", "/api/auth/logout"].some(
+        (path) => url.includes(path)
+      );
+      if (!config || config.retried || isAuthCall || error.response?.status !== 401) {
+        return Promise.reject(error);
+      }
+      config.retried = true;
+      const renewed = await refreshSession();
+      if (!renewed) return Promise.reject(error);
+      return client.request(config);
+    }
+  );
+  return client;
+}
+
+export const b2c = retryAfterRefresh(
+  withSession(
+    axios.create({
+      baseURL: b2cBase,
+      withCredentials: true,
+    })
+  )
 );
 
-export const b2b = withSession(
-  axios.create({
-    baseURL: b2bBase,
-    withCredentials: true,
-    headers: {
-      "X-CSRF-Protection": "1",
-    },
-  })
+export const b2b = retryAfterRefresh(
+  withSession(
+    axios.create({
+      baseURL: b2bBase,
+      withCredentials: true,
+      headers: {
+        "X-CSRF-Protection": "1",
+      },
+    })
+  )
 );
 
 export const http = b2c;

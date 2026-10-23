@@ -99,7 +99,7 @@ async def run(args):
                 "/products",
                 json={
                     "title": f"Kafka check {uuid4().hex[:8]}",
-                    "image": media["url"],
+                    "images": [media["url"], media["url"]],
                     "price": 100,
                     "saleMode": "deal_only",
                     "dealContacts": "Contact the workshop",

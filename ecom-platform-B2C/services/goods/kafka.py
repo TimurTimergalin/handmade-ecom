@@ -43,23 +43,43 @@ def product_deleted(product: dict[str, Any]) -> bool:
     return deleted is not None and deleted != ""
 
 
+def _gallery(product: dict[str, Any]) -> list[dict[str, str]]:
+    raw = product.get("images")
+    urls: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                url = item.strip()
+            elif isinstance(item, dict):
+                url = str(item.get("url") or item.get("src") or "").strip()
+            else:
+                continue
+            if url:
+                urls.append(url)
+    if not urls:
+        image = product.get("image") or ""
+        if isinstance(image, str) and image.strip():
+            urls.append(image.strip())
+    return [{"url": url} for url in urls]
+
+
 def product_to_upsert_payload(product: dict[str, Any]) -> dict[str, Any]:
     raw_id = _pick(product, "id", "productId")
     product_id = "" if raw_id is None else str(raw_id)
     seller_raw = _pick(product, "sellerId", "seller_id")
-    image = product.get("image") or ""
     title = product.get("title") or ""
     price = _pick(product, "price")
     stock = _pick(product, "inStock", "in_stock")
     deliveries = _pick(product, "availableDeliveries", "available_deliveries")
     pickup = _pick(product, "pickupPoints", "pickup_points")
-    return {
+    ship_days = _pick(product, "cdekShipDays", "cdek_ship_days")
+    mapped = {
         "id": product_id,
         "slug": product_id,
         "title": title,
         "description": product.get("description") or "",
         "seller_id": "" if seller_raw is None else str(seller_raw),
-        "images": [{"url": image}] if image else [],
+        "images": _gallery(product),
         "is_active": True,
         "sale_mode": product.get("saleMode") or product.get("sale_mode") or "online",
         "available_deliveries": deliveries if isinstance(deliveries, list) else [],
@@ -77,6 +97,11 @@ def product_to_upsert_payload(product: dict[str, Any]) -> dict[str, Any]:
             }
         ],
     }
+    if isinstance(ship_days, list):
+        mapped["cdek_ship_days"] = [
+            day for day in ship_days if type(day) is int and 0 <= day <= 6
+        ]
+    return mapped
 
 
 def _b2b_goods_url() -> str:
@@ -123,6 +148,9 @@ async def _handle_b2b_product(topic: str, payload: dict[str, Any]) -> None:
     seller_raw = product.get("sellerId") or product.get("seller_id") or inner.get("sellerId")
     if seller_raw:
         await ensure_seller(str(seller_raw))
+    event_days = _pick(inner, "cdekShipDays", "cdek_ship_days")
+    if isinstance(event_days, list):
+        product = {**product, "cdekShipDays": event_days}
     mapped = product_to_upsert_payload(product)
     if not mapped["seller_id"]:
         logger.warning("b2b_product_missing_seller", product_id=str(product_id))

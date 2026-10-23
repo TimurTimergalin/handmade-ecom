@@ -12,6 +12,7 @@ export interface User {
   roles: UserRole[];
   bio?: string;
   email?: string;
+  phone?: string | null;
   createdAt: string;
 }
 
@@ -27,6 +28,14 @@ export interface Seller {
   productsCount: number;
   postsCount: number;
   joinedAt: string;
+  legalType?: "person" | "company" | null;
+  lastName?: string | null;
+  firstName?: string | null;
+  patronymic?: string | null;
+  legalName?: string | null;
+  inn?: string | null;
+  ogrn?: string | null;
+  legalAddress?: string | null;
 }
 
 // ============================================================
@@ -39,6 +48,9 @@ export type SaleMode = "online" | "out_of_stock" | "deal_only";
 export interface PickupPoint {
   city: string;
   address: string;
+  maxDays?: number;
+  /** Код ПВЗ СДЭК, если пункт выбран на карте. */
+  code?: string;
 }
 
 export interface Product {
@@ -46,6 +58,7 @@ export interface Product {
   title: string;
   description?: string;
   image: string;
+  images: string[];
   price: number;
   currency: "RUB";
   sellerId: string;
@@ -53,9 +66,15 @@ export interface Product {
   saleMode: SaleMode;
   availableDeliveries: DeliveryMethod[];
   pickupPoints?: PickupPoint[];
+  /** Дни отгрузки СДЭК: 0 — понедельник, 6 — воскресенье. */
+  cdekShipDays?: number[];
   dealContacts?: string;
   inStock: number;
   createdAt: string;
+  moderationStatus?: "pending" | "active" | "rejected";
+  draftStatus?: "pending" | "rejected" | null;
+  rejectionReason?: string | null;
+  draft?: Partial<Product> | null;
 }
 
 // ============================================================
@@ -75,6 +94,11 @@ export interface Post {
   likesCount: number;
   commentsCount: number;
   isLiked: boolean;
+  status?: "draft" | "published";
+  moderationStatus?: "pending" | "active" | "rejected" | null;
+  draftStatus?: "pending" | "rejected" | null;
+  rejectionReason?: string | null;
+  draft?: Partial<Post> | null;
 }
 
 // ============================================================
@@ -84,13 +108,11 @@ export interface Post {
 export interface CartItem {
   productId: string;
   quantity: number;
-  delivery: DeliveryMethod;
 }
 
 export interface CartGroup {
-  key: string; // `${sellerId}__${delivery}`
+  key: string; // sellerId
   seller: Seller;
-  delivery: DeliveryMethod;
   items: CartItem[]; // доступные к заказу
   unavailableItems: CartItem[]; // закончившиеся / deal_only
 }
@@ -99,7 +121,7 @@ export interface CartGroup {
 // Заказы
 // ============================================================
 
-export type OrderStatus = "created" | "paid" | "shipped" | "delivered" | "cancelled";
+export type OrderStatus = "created" | "paid" | "shipped" | "delivering" | "delivered" | "completed" | "cancelled";
 
 export interface OrderItem {
   product: Product;
@@ -115,6 +137,7 @@ export interface Order {
   items: OrderItem[];
   delivery: DeliveryMethod;
   pickupPoint?: PickupPoint;
+  receivalCode?: string | null;
   trackingNumber?: string;
   total: number;
 }

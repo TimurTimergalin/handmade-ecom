@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ContractModel(BaseModel):
@@ -20,6 +20,7 @@ class UserDTO(ContractModel):
     email: str
     roles: list[Literal["buyer", "seller"]] = Field(default_factory=lambda: ["buyer"])
     bio: str | None = None
+    phone: str | None = None
     created_at: datetime = Field(alias="createdAt")
 
 
@@ -35,6 +36,14 @@ class SellerDTO(ContractModel):
     products_count: int = Field(0, alias="productsCount")
     posts_count: int = Field(0, alias="postsCount")
     joined_at: datetime = Field(alias="joinedAt")
+    legal_type: Literal["person", "company"] | None = Field(None, alias="legalType")
+    last_name: str | None = Field(None, alias="lastName")
+    first_name: str | None = Field(None, alias="firstName")
+    patronymic: str | None = None
+    legal_name: str | None = Field(None, alias="legalName")
+    inn: str | None = None
+    ogrn: str | None = None
+    legal_address: str | None = Field(None, alias="legalAddress")
 
 
 class ProductDTO(ContractModel):
@@ -42,7 +51,22 @@ class ProductDTO(ContractModel):
     title: str
     description: str | None = None
     image: str
+    images: list[str] = Field(default_factory=list)
     price: int
+
+    @model_validator(mode="after")
+    def sync_images(self):
+        urls = [url.strip() for url in self.images if isinstance(url, str) and url.strip()]
+        if urls:
+            self.images = urls
+            self.image = urls[0]
+        elif self.image.strip():
+            self.image = self.image.strip()
+            self.images = [self.image]
+        else:
+            self.image = ""
+            self.images = []
+        return self
     currency: Literal["RUB"] = "RUB"
     seller_id: str = Field(alias="sellerId")
     seller: SellerDTO
@@ -50,7 +74,8 @@ class ProductDTO(ContractModel):
     available_deliveries: list[Literal["pickup", "cdek"]] = Field(
         default_factory=list, alias="availableDeliveries"
     )
-    pickup_points: list[dict[str, str]] | None = Field(None, alias="pickupPoints")
+    pickup_points: list[dict[str, str | int]] | None = Field(None, alias="pickupPoints")
+    cdek_ship_days: list[int] = Field(default_factory=list, alias="cdekShipDays")
     deal_contacts: str | None = Field(None, alias="dealContacts")
     in_stock: int = Field(0, alias="inStock")
     created_at: datetime = Field(alias="createdAt")
@@ -97,12 +122,13 @@ class OrderItemDTO(ContractModel):
 class OrderDTO(ContractModel):
     id: str
     created_at: datetime = Field(alias="createdAt")
-    status: Literal["created", "paid", "shipped", "delivered", "cancelled"]
+    status: Literal["created", "paid", "shipped", "delivering", "delivered", "completed", "cancelled"]
     buyer: UserDTO | None = None
     seller: SellerDTO
     items: list[OrderItemDTO]
     delivery: Literal["pickup", "cdek"]
     pickup_point: dict[str, str] | None = Field(None, alias="pickupPoint")
+    receival_code: str | None = Field(None, alias="receivalCode")
     tracking_number: str | None = Field(None, alias="trackingNumber")
     total: int
 

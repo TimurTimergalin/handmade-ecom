@@ -18,8 +18,10 @@ COPY libs/common /app/libs/common
 
 ARG SERVICE
 ENV SERVICE=${SERVICE}
+ENV PYTHONPATH=/app/libs:/app/services/${SERVICE}:/app/services
 
 COPY services/${SERVICE} /app/services/${SERVICE}
+COPY services/cdek /app/services/cdek
 
 WORKDIR /app/services/${SERVICE}
 EXPOSE 8000

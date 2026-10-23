@@ -1,10 +1,11 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from marketplace.b2b.models.entities import Store
-from tests.conftest import USER_B, onboard, product
+from marketplace.goods.models.entities import Product
+from tests.conftest import USER_B, onboard, product, upload
 
 
 async def test_complete_flow(cluster, seller):
@@ -36,7 +37,9 @@ async def test_complete_flow(cluster, seller):
     assert "onclick" not in post.json()["data"]["body"]
     published = await client.post(f"/api/seller/posts/{post_id}/publish")
     assert published.status_code == 200, published.text
-    assert published.json()["data"]["publishedAt"]
+    assert published.json()["data"]["status"] == "draft"
+    assert published.json()["data"]["moderationStatus"] == "pending"
+    assert published.json()["data"]["publishedAt"] is None
     assert published.json()["data"]["products"][0]["id"] == item_id
     assert (await client.delete(f"/api/products/{item_id}")).status_code == 200
     historical = (await client.get(f"/api/seller/posts/{post_id}")).json()["data"]
@@ -103,14 +106,33 @@ async def test_profile_delivery_and_checklist(cluster, seller):
         "/api/seller/profile", json={"avatar": media["url"], "displayName": "Обновлено"}
     )
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["displayName"] == "Обновлено"
-    assert response.json()["data"]["publicUrl"] == "/shops/shop_a"
-    good = {
+    body = response.json()["data"]
+    assert body["displayName"] == "Мастерская"
+    assert body["profileStatus"] == "pending"
+    assert body["profileDraft"]["displayName"] == "Обновлено"
+    assert body["publicUrl"] == "/shops/shop_a"
+    approved = await client.post(f"/api/moderation/profiles/{body['id']}/accept")
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["data"]["displayName"] == "Обновлено"
+    incomplete = {
         "pickupEnabled": True,
-        "pickupPoints": [{"city": "Москва", "address": "Улица 1"}],
+        "pickupPoints": [{"city": "Москва", "address": "Улица 1", "maxDays": 3}],
         "cdekEnabled": True,
     }
+    assert (await client.patch("/api/seller/delivery", json=incomplete)).status_code == 400
+    no_days = {
+        **incomplete,
+        "cdekOfficeCode": "MSK1",
+        "cdekOfficeAddress": "ул. Пример, 1",
+    }
+    assert (await client.patch("/api/seller/delivery", json=no_days)).status_code == 400
+    good = {**no_days, "cdekShipDays": [0, 2, 4]}
     assert (await client.patch("/api/seller/delivery", json=good)).json()["data"] == good
+    missing_days = await client.patch(
+        "/api/seller/delivery",
+        json={"pickupPoints": [{"city": "Москва", "address": "Улица 1"}]},
+    )
+    assert missing_days.status_code == 400
     invalid = await client.patch("/api/seller/delivery", json={"pickupPoints": []})
     assert invalid.status_code == 400
     assert (await client.get("/api/seller/delivery")).json()["data"] == good
@@ -131,7 +153,12 @@ async def test_profile_delivery_and_checklist(cluster, seller):
         {"availableDeliveries": ["pickup"]},
         {"dealContacts": ""},
         {"sellerId": str(uuid4())},
-        {"image": "https://example.com/not-uploaded.png"},
+        {
+            "images": [
+                "https://example.com/not-uploaded.png",
+                "https://example.com/not-uploaded.png",
+            ]
+        },
     ],
 )
 async def test_product_validation(cluster, seller, changes):
@@ -139,6 +166,62 @@ async def test_product_validation(cluster, seller, changes):
     response = await product(cluster.client, media["url"], **changes)
     assert response.status_code == 400, response.text
     assert (await cluster.client.get("/api/seller/products")).json()["data"]["total"] == 0
+
+
+async def test_product_gallery_requires_two_urls_on_write(cluster, seller):
+    client = cluster.client
+    _, media = seller
+    first = media["url"]
+    second = (await upload(client))["url"]
+    base = {
+        "title": "Керамическая чашка",
+        "price": 1800,
+        "saleMode": "deal_only",
+        "dealContacts": "Телефон +7 999 000 00 00",
+        "inStock": 3,
+    }
+    only_cover = await client.post("/api/products", json={**base, "image": first})
+    assert only_cover.status_code == 400, only_cover.text
+    assert "Нужно минимум 2 картинки" in only_cover.text
+    one = await product(client, first, images=[first])
+    assert one.status_code == 400, one.text
+    assert "Нужно минимум 2 картинки" in one.text
+    blanks = await product(client, first, images=[first, "  "])
+    assert blanks.status_code == 400, blanks.text
+    created = await product(client, first, images=[second, first])
+    assert created.status_code == 201, created.text
+    body = created.json()["data"]
+    assert body["images"] == [second, first]
+    assert body["image"] == second
+    product_id = body["id"]
+    rejected = await client.patch(f"/api/products/{product_id}", json={"images": [first]})
+    assert rejected.status_code == 400, rejected.text
+    assert "Нужно минимум 2 картинки" in rejected.text
+    updated = await client.patch(
+        f"/api/products/{product_id}", json={"images": [first, second]}
+    )
+    assert updated.status_code == 200, updated.text
+    updated_body = updated.json()["data"]
+    assert updated_body["images"] == [first, second]
+    assert updated_body["image"] == first
+    async with cluster.apps["goods"].state.sessions() as db:
+        stored = await db.get(Product, UUID(product_id))
+        stored.images = [first]
+        stored.image = first
+        await db.commit()
+    kept = (await client.get(f"/api/seller/products/{product_id}")).json()["data"]
+    assert kept["images"] == [first]
+    assert kept["image"] == first
+    priced = await client.patch(f"/api/products/{product_id}", json={"price": 1900})
+    assert priced.status_code == 200, priced.text
+    priced_body = priced.json()["data"]
+    assert priced_body["price"] == 1900
+    assert priced_body["images"] == [first]
+    assert priced_body["image"] == first
+    async with cluster.apps["goods"].state.sessions() as db:
+        stored = await db.get(Product, UUID(product_id))
+        assert stored.images == [first]
+        assert stored.image == first
 
 
 async def test_product_quota_and_reclaimed_slot(cluster, seller):

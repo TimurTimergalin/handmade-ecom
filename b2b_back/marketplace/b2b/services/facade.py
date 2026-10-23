@@ -52,6 +52,7 @@ class SellerFacade:
         data = await self.snapshot(store)
         data["payoutToken"] = store.payout_token or ""
         data["payoutCard"] = store.payout_card or None
+        data["yookassaShopId"] = store.yookassa_shop_id or ""
         policy = await self.stores.entitlement(store.id)
         data.update(
             ownerUserId=str(store.owner_user_id),
@@ -59,6 +60,9 @@ class SellerFacade:
             planTier=policy.tier,
             delivery=await self.stores.delivery(store),
             publicUrl=f"{self.state.settings.public_storefront_prefix.rstrip('/')}/{store.username}",
+            profileStatus=store.profile_status,
+            profileRejectionReason=store.profile_rejection_reason,
+            profileDraft=store.profile_draft,
         )
         return data
 
@@ -136,8 +140,9 @@ class SellerFacade:
         order = await self.order(store, order_id)
         allowed = {
             "created": {"cancelled"},
-            "paid": {"shipped", "cancelled"},
-            "shipped": {"delivered"},
+            "paid": {"shipped", "delivered", "cancelled"},
+            "shipped": {"delivered", "completed"},
+            "delivered": {"completed", "cancelled"},
         }
         if payload.status not in allowed.get(order.status, set()):
             invalid("Недопустимый переход статуса", "status")

@@ -14,7 +14,7 @@ export default async function HomePage() {
           <h2 className="text-lg font-semibold">Рекомендации</h2>
           <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-1">
             {recommendations.map((product) => (
-              <div key={product.id} className="w-44 shrink-0">
+              <div key={product.id} className="w-52 shrink-0">
                 <ProductCard product={product} />
               </div>
             ))}

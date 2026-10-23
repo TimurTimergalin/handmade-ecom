@@ -1,47 +1,48 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { AddToCartButton } from "./AddToCartButton";
-import { DELIVERY_LABELS } from "@/lib/constants";
+import { BuyNowButton } from "./BuyNowButton";
+import { useCartStore } from "@/store/cart";
 import { cn } from "@/lib/utils";
-import type { DeliveryMethod, Product } from "@/types";
+import type { Product } from "@/types";
 
-export function ProductSnippetActions({ product }: { product: Product }) {
-  const [delivery, setDelivery] = useState<DeliveryMethod>(product.availableDeliveries[0]);
-
-  const hasChoice = product.availableDeliveries.length > 1;
+export function ProductSnippetActions({
+  product,
+  className,
+}: {
+  product: Product;
+  className?: string;
+}) {
+  const storedInCart = useCartStore(
+    (s) =>
+      product.saleMode !== "deal_only" &&
+      product.inStock > 0 &&
+      s.items.some((item) => item.productId === product.id && item.quantity > 0)
+  );
+  const [cartReady, setCartReady] = useState(false);
+  useEffect(() => setCartReady(true), []);
+  const inCart = cartReady && storedInCart;
 
   return (
-    <div className="mt-2 flex flex-col gap-2">
-      {hasChoice && (
-        <div className="flex gap-1" role="group" aria-label="Способ доставки">
-          {product.availableDeliveries.map((d) => {
-            const active = delivery === d;
-            return (
-              <button
-                key={d}
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setDelivery(d);
-                }}
-                className={cn(
-                  "flex-1 rounded-md border px-1.5 py-1 text-[10px] font-medium transition-colors",
-                  active
-                    ? "border-primary bg-primary/10 text-foreground"
-                    : "text-muted-foreground hover:bg-muted"
-                )}
-              >
-                {DELIVERY_LABELS[d]}
-              </button>
-            );
-          })}
-        </div>
+    <div className={cn("flex items-center gap-2", inCart && "grid grid-cols-2", className)}>
+      <AddToCartButton
+        productId={product.id}
+        saleMode={product.saleMode}
+        className={inCart ? undefined : "w-full"}
+        counterClassName="h-7 w-full"
+        maxQuantity={product.inStock}
+      />
+      {inCart && (
+        <BuyNowButton
+          productId={product.id}
+          addIfMissing={false}
+          className="h-7 w-full rounded-md px-2 py-0 text-xs leading-none whitespace-nowrap"
+        >
+          Купить
+        </BuyNowButton>
       )}
-
-      <AddToCartButton productId={product.id} saleMode={product.saleMode} delivery={delivery} />
     </div>
   );
 }

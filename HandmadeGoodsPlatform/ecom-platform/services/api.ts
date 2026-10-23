@@ -1,6 +1,6 @@
-import type { AxiosResponse } from "axios";
+import axios, { type AxiosResponse } from "axios";
 
-import { b2b, b2c, isNotFound, readData } from "@/lib/axios";
+import { b2b, b2c, HttpError, isNotFound, readData } from "@/lib/axios";
 import type {
   ApiResponse,
   DeliveryMethod,
@@ -20,6 +20,7 @@ export interface ProductInput {
   title: string;
   description: string;
   image: string;
+  images: string[];
   price: number;
   inStock: number;
   saleMode: SaleMode;
@@ -44,6 +45,10 @@ export interface SellerProfile {
   avatar?: string | null;
   payoutToken?: string | null;
   payoutCard?: PayoutCard | null;
+  yookassaShopId?: string | null;
+  profileStatus?: "pending" | "rejected" | null;
+  profileRejectionReason?: string | null;
+  profileDraft?: { displayName?: string; bio?: string; avatar?: string } | null;
 }
 
 export interface PayoutCard {
@@ -56,6 +61,9 @@ export interface DeliverySettings {
   pickupEnabled: boolean;
   pickupPoints: PickupPoint[];
   cdekEnabled: boolean;
+  cdekOfficeCode?: string;
+  cdekOfficeAddress?: string;
+  cdekShipDays?: number[];
 }
 
 export interface CheckoutGroup {
@@ -63,12 +71,6 @@ export interface CheckoutGroup {
   delivery: DeliveryMethod;
   items: { productId: string; quantity: number }[];
   pickupPoint?: PickupPoint;
-}
-
-export interface CheckoutContact {
-  name: string;
-  phone: string;
-  email: string;
 }
 
 export interface CheckoutResult {
@@ -90,12 +92,43 @@ function normalizeSeller(seller?: Partial<Seller> | null): Seller {
     productsCount: raw.productsCount ?? 0,
     postsCount: raw.postsCount ?? 0,
     joinedAt: raw.joinedAt ?? new Date(0).toISOString(),
+    legalType: raw.legalType === "person" || raw.legalType === "company" ? raw.legalType : null,
+    lastName: raw.lastName ?? null,
+    firstName: raw.firstName ?? null,
+    patronymic: raw.patronymic ?? null,
+    legalName: raw.legalName ?? null,
+    inn: raw.inn ?? null,
+    ogrn: raw.ogrn ?? null,
+    legalAddress: raw.legalAddress ?? null,
   };
 }
 
-function normalizeProduct(product: Product): Product {
+type ProductSource = Omit<Product, "images" | "seller"> & {
+  images?: string[] | null;
+  seller?: Partial<Seller> | null;
+};
+
+function collectProductImages(product: {
+  image?: string | null;
+  images?: string[] | null;
+}): string[] {
+  const listed = Array.isArray(product.images)
+    ? product.images
+        .filter((url): url is string => typeof url === "string")
+        .map((url) => url.trim())
+        .filter(Boolean)
+    : [];
+  if (listed.length > 0) return listed;
+  const single = typeof product.image === "string" ? product.image.trim() : "";
+  return single ? [single] : [];
+}
+
+function normalizeProduct(product: ProductSource): Product {
+  const images = collectProductImages(product);
   return {
     ...product,
+    image: images[0] || product.image || "",
+    images,
     seller: normalizeSeller(product?.seller),
     description: product?.description ?? undefined,
     price: Number(product?.price ?? 0),
@@ -190,38 +223,6 @@ export async function getPosts(): Promise<Post[]> {
 export async function getPost(id: string): Promise<Post | null> {
   const post = await readOrNull(b2c.get<ApiResponse<Post>>(`/api/posts/${id}`));
   return post ? normalizePost(post) : null;
-}
-
-export interface PostComment {
-  id: string;
-  postId: string;
-  author: { id: string; username: string; displayName: string; avatar: string };
-  body: string;
-  createdAt: string;
-  isOwn: boolean;
-}
-
-export async function getPostComments(postId: string): Promise<PostComment[]> {
-  const page = await readData(
-    b2c.get<ApiResponse<{ items: PostComment[] }>>(`/api/posts/${postId}/comments`, {
-      params: { limit: 50 },
-    })
-  );
-  return page?.items ?? [];
-}
-
-export async function addPostComment(postId: string, body: string): Promise<PostComment> {
-  return readData(b2c.post<ApiResponse<PostComment>>(`/api/posts/${postId}/comments`, { body }));
-}
-
-export async function togglePostLike(
-  postId: string,
-  liked: boolean
-): Promise<{ isLiked: boolean; likesCount: number }> {
-  const call = liked
-    ? b2c.delete<ApiResponse<{ isLiked: boolean; likesCount: number }>>(`/api/posts/${postId}/like`)
-    : b2c.post<ApiResponse<{ isLiked: boolean; likesCount: number }>>(`/api/posts/${postId}/like`);
-  return readData(call);
 }
 
 export async function getPostsBySeller(sellerId: string): Promise<Post[]> {
@@ -338,6 +339,11 @@ export async function createProduct(input: ProductInput): Promise<Product> {
   return normalizeProduct(product);
 }
 
+export async function revertProduct(id: string): Promise<Product> {
+  const product = await readData(b2b.post<ApiResponse<Product>>(`/api/products/${id}/revert`));
+  return normalizeProduct(product);
+}
+
 export async function updateProduct(id: string, input: ProductInput): Promise<Product> {
   const product = await readData(b2b.patch<ApiResponse<Product>>(`/api/products/${id}`, input));
   return normalizeProduct(product);
@@ -395,16 +401,43 @@ export async function getSubscriptionSellers(q = ""): Promise<Seller[]> {
   return (page?.items ?? []).map((seller) => normalizeSeller(seller));
 }
 
+export async function getSellerApplication(): Promise<{
+  status: "pending" | "rejected" | "active" | null;
+  rejectionReason: string | null;
+}> {
+  return readData(
+    b2b.get<
+      ApiResponse<{ status: "pending" | "rejected" | "active" | null; rejectionReason: string | null }>
+    >("/api/users/me/seller-application")
+  );
+}
+
 export async function becomeSeller(input: {
   username: string;
   displayName: string;
   bio?: string;
+  legalType: "person" | "company";
+  lastName?: string;
+  firstName?: string;
+  patronymic?: string;
+  legalName?: string;
+  inn: string;
+  ogrn?: string;
+  legalAddress?: string;
 }): Promise<void> {
   await readData(
     b2b.post<ApiResponse<unknown>>("/api/users/me/become-seller", {
       username: input.username,
       displayName: input.displayName,
       bio: input.bio ?? "",
+      legalType: input.legalType,
+      lastName: input.lastName ?? "",
+      firstName: input.firstName ?? "",
+      patronymic: input.patronymic ?? "",
+      legalName: input.legalName ?? "",
+      inn: input.inn,
+      ogrn: input.ogrn ?? "",
+      legalAddress: input.legalAddress ?? "",
     })
   );
 }
@@ -413,9 +446,30 @@ export async function getSellerProfile(): Promise<SellerProfile> {
   return readData(b2b.get<ApiResponse<SellerProfile>>("/api/seller/profile"));
 }
 
-export async function getSellerSubscription(): Promise<{ tier: string; onlinePayments: boolean }> {
+export async function getSellerSubscription(): Promise<{
+  tier: string;
+  onlinePayments: boolean;
+  validUntil: string | null;
+  autoRenew: boolean;
+}> {
   return readData(
-    b2b.get<ApiResponse<{ tier: string; onlinePayments: boolean }>>("/api/seller/subscription")
+    b2b.get<
+      ApiResponse<{
+        tier: string;
+        onlinePayments: boolean;
+        validUntil: string | null;
+        autoRenew: boolean;
+      }>
+    >("/api/seller/subscription")
+  );
+}
+
+export async function setAutoRenew(enabled: boolean): Promise<{ autoRenew: boolean; validUntil: string | null }> {
+  return readData(
+    b2b.post<ApiResponse<{ autoRenew: boolean; validUntil: string | null }>>(
+      "/api/seller/subscription/auto-renew",
+      { enabled }
+    )
   );
 }
 
@@ -429,9 +483,39 @@ export async function subscribePremium(): Promise<{ paymentUrl: string; status: 
   );
 }
 
-export async function syncSubscription(): Promise<{ status: string; tier: string }> {
+export async function syncSubscription(): Promise<{
+  status: string;
+  tier: string;
+  validUntil: string | null;
+}> {
   return readData(
-    b2b.post<ApiResponse<{ status: string; tier: string }>>("/api/seller/subscription/sync")
+    b2b.post<ApiResponse<{ status: string; tier: string; validUntil: string | null }>>(
+      "/api/seller/subscription/sync"
+    )
+  );
+}
+
+export async function getTestSubscription(reference: string): Promise<{
+  amount: number;
+  status: string;
+  paid: boolean;
+}> {
+  return readData(
+    b2c.get<ApiResponse<{ amount: number; status: string; paid: boolean }>>(
+      `/api/payments/test-subscription/${reference}`
+    )
+  );
+}
+
+export async function confirmTestSubscription(reference: string): Promise<{
+  amount: number;
+  status: string;
+  paid: boolean;
+}> {
+  return readData(
+    b2c.post<ApiResponse<{ amount: number; status: string; paid: boolean }>>(
+      `/api/payments/test-subscription/${reference}`
+    )
   );
 }
 
@@ -472,10 +556,15 @@ export async function savePayoutToken(payoutToken: string, card?: PayoutCard | n
   );
 }
 
+export async function revertSellerProfile(): Promise<SellerProfile> {
+  return readData(b2b.post<ApiResponse<SellerProfile>>("/api/seller/profile/revert"));
+}
+
 export async function updateSellerProfile(input: {
   displayName: string;
   bio: string;
-  avatar: string;
+  avatar?: string;
+  yookassaShopId?: string;
 }): Promise<SellerProfile> {
   return readData(b2b.patch<ApiResponse<SellerProfile>>("/api/seller/profile", input));
 }
@@ -486,6 +575,18 @@ export async function getDeliverySettings(): Promise<DeliverySettings> {
 
 export async function updateDeliverySettings(input: DeliverySettings): Promise<DeliverySettings> {
   return readData(b2b.patch<ApiResponse<DeliverySettings>>("/api/seller/delivery", input));
+}
+
+export async function uploadApplicationAvatar(file: File): Promise<string> {
+  const form = new FormData();
+  form.append("file", file);
+  const data = await readData(
+    b2b.post<ApiResponse<{ url: string }>>("/api/users/me/seller-application/avatar", form)
+  );
+  if (!data?.url) {
+    throw new Error("Не удалось загрузить изображение");
+  }
+  return data.url;
 }
 
 export async function uploadImage(file: File): Promise<string> {
@@ -516,16 +617,54 @@ export async function getOrder(id: string): Promise<Order | null> {
   return order ? normalizeOrder(order) : null;
 }
 
+export async function quoteCdekDelivery(body: {
+  sellerId: string;
+  toOfficeCode: string;
+  itemCount: number;
+}): Promise<number> {
+  try {
+    const response = await b2c.post<{ price?: unknown; error?: { message?: string } }>(
+      "/api/cdek/quote",
+      body
+    );
+    const price = response.data?.price;
+    if (typeof price !== "number" || !Number.isFinite(price)) {
+      throw new HttpError("Не удалось рассчитать доставку", response.status);
+    }
+    return price;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    if (axios.isAxiosError(error)) {
+      const data = error.response?.data as { error?: { message?: string } } | undefined;
+      const message = data?.error?.message || "Не удалось рассчитать доставку";
+      throw new HttpError(message, error.response?.status ?? 0);
+    }
+    throw error;
+  }
+}
+
 export async function createOrder(body: {
   groups: CheckoutGroup[];
-  contact: CheckoutContact;
 }): Promise<CheckoutResult> {
   return readData(b2c.post<ApiResponse<CheckoutResult>>("/api/orders", body));
 }
 
-export async function completePickup(orderId: string, receivalCode: string): Promise<Order> {
+export async function cancelOrder(orderId: string): Promise<Order> {
+  const order = await readData(b2c.post<ApiResponse<Order>>(`/api/orders/${orderId}/cancel`));
+  return normalizeOrder(order);
+}
+
+export async function repayOrder(orderId: string): Promise<{ paymentUrl: string | null }> {
+  return readData(
+    b2c.post<ApiResponse<{ paymentUrl: string | null }>>(`/api/orders/${orderId}/pay`)
+  );
+}
+
+export async function completePickup(orderId: string, receivalCode?: string): Promise<Order> {
   const order = await readData(
-    b2c.post<ApiResponse<Order>>(`/api/orders/${orderId}/receive`, { receivalCode })
+    b2c.post<ApiResponse<Order>>(`/api/orders/${orderId}/receive`, {
+      receivalCode: receivalCode ?? null,
+    })
   );
   return normalizeOrder(order);
 }

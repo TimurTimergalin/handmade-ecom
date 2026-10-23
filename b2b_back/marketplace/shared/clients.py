@@ -4,6 +4,7 @@ from uuid import UUID
 
 from marketplace.goods.schemas.products import Batch, ProductCreate, ProductPatch, ProductRead
 from marketplace.publications.schemas.posts import PostCreate, PostPatch, PostRead
+from marketplace.shared.errors import DomainError
 from marketplace.shared.http import HTTPClient
 from marketplace.shared.readmodels import GoodsSummary
 from marketplace.shared.schemas import Entitlements, Page
@@ -27,6 +28,18 @@ class PolicyClient(HTTPClient):
         await self.request(
             "POST", f"/internal/sellers/{seller_id}/media/validate", body={"url": url}
         )
+
+    async def ship_days(self, seller_id: UUID) -> list[int]:
+        try:
+            data = await self.request("GET", f"/internal/sellers/{seller_id}/cdek-shipment")
+        except DomainError as exc:
+            if exc.status == 404:
+                return []
+            raise
+        raw = data.get("shipDays") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return []
+        return [day for day in raw if type(day) is int]
 
 
 class GoodsClient(HTTPClient):
@@ -65,6 +78,27 @@ class GoodsClient(HTTPClient):
     async def delete(self, seller_id: UUID, product_id: UUID) -> None:
         await self.request("DELETE", f"/internal/sellers/{seller_id}/products/{product_id}")
 
+    async def discard_product_draft(self, seller_id: UUID, product_id: UUID) -> ProductRead:
+        return self.parse(
+            ProductRead,
+            await self.request(
+                "POST", f"/internal/sellers/{seller_id}/products/{product_id}/revert"
+            ),
+        )
+
+    async def pending_product_moderation(self) -> list[dict]:
+        return await self.request("GET", "/internal/moderation/products")
+
+    async def accept_product(self, product_id: UUID) -> dict:
+        return await self.request("POST", f"/internal/moderation/products/{product_id}/accept")
+
+    async def reject_product(self, product_id: UUID, reason: str) -> dict:
+        return await self.request(
+            "POST",
+            f"/internal/moderation/products/{product_id}/reject",
+            body={"reason": reason},
+        )
+
     async def batch(
         self, seller_id: UUID, ids: list[UUID], include_deleted=False
     ) -> list[ProductRead]:
@@ -76,6 +110,13 @@ class GoodsClient(HTTPClient):
             ),
         )
         return self.parse(list[ProductRead], data)
+
+    async def broadcast_ship_days(self, seller_id: UUID, ship_days: list[int]) -> None:
+        await self.request(
+            "POST",
+            f"/internal/sellers/{seller_id}/products/shipment-days",
+            body={"shipDays": ship_days},
+        )
 
     async def summary(self, seller_id: UUID, threshold: int) -> dict:
         result = self.parse(
@@ -94,6 +135,23 @@ class PublicationsClient(HTTPClient):
         return self.parse(
             Page[PostRead],
             await self.request("GET", f"/internal/sellers/{seller_id}/posts", params=params),
+        )
+
+    async def discard_post_draft(self, seller_id: UUID, post_id: UUID) -> PostRead:
+        return self.parse(
+            PostRead,
+            await self.request("POST", f"/internal/sellers/{seller_id}/posts/{post_id}/revert"),
+        )
+
+    async def pending_post_moderation(self) -> list[dict]:
+        return await self.request("GET", "/internal/moderation/posts")
+
+    async def accept_post(self, post_id: UUID) -> dict:
+        return await self.request("POST", f"/internal/moderation/posts/{post_id}/accept")
+
+    async def reject_post(self, post_id: UUID, reason: str) -> dict:
+        return await self.request(
+            "POST", f"/internal/moderation/posts/{post_id}/reject", body={"reason": reason}
         )
 
     async def get(self, seller_id: UUID, post_id: UUID) -> PostRead:

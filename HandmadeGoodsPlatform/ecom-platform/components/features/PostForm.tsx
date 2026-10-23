@@ -79,7 +79,11 @@ export function PostForm({
       if (!initialPost) {
         await publishPost(id);
       }
-      toast.success(isEdit ? "Публикация обновлена" : "Публикация создана");
+      toast.success(
+        isEdit && initialPost?.status === "published"
+          ? "Изменения публикации отправлены на модерацию"
+          : "Публикация отправлена на модерацию"
+      );
       router.push(ROUTES.seller.posts);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось сохранить публикацию");
@@ -102,6 +106,28 @@ export function PostForm({
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
+      {initialPost?.moderationStatus === "pending" && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Публикация на модерации и пока не показана в ленте.
+        </div>
+      )}
+      {initialPost?.moderationStatus === "rejected" && (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          Публикация отклонена
+          {initialPost.rejectionReason ? `: ${initialPost.rejectionReason}` : ""}. Отправьте её снова.
+        </div>
+      )}
+      {initialPost?.draftStatus === "pending" && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Изменения на модерации. В ленте пока прежний текст.
+        </div>
+      )}
+      {initialPost?.draftStatus === "rejected" && (
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+          Изменения отклонены
+          {initialPost.rejectionReason ? `: ${initialPost.rejectionReason}` : ""}.
+        </div>
+      )}
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">
         <h2 className="font-semibold">Содержание</h2>
 
@@ -133,30 +159,40 @@ export function PostForm({
           <PostEditor value={body} onChange={setBody} />
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-muted-foreground text-xs">URL обложки (необязательно)</span>
-          <input
-            type="text"
-            value={coverImage}
-            onChange={(e) => setCoverImage(e.target.value)}
-            placeholder="https://..."
-            className="bg-background focus:ring-primary/30 rounded-md border px-3 py-2 text-sm outline-none focus:ring-2"
-          />
-        </label>
-        <label className="text-muted-foreground flex items-center gap-2 text-xs">
-          <input
-            type="file"
-            accept="image/*"
-            disabled={isUploading}
-            className="text-xs"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              e.target.value = "";
-              void handleCoverFile(file);
-            }}
-          />
-          {isUploading ? "Загрузка..." : "или загрузите файл"}
-        </label>
+        <div className="flex flex-col gap-2">
+          <span className="text-muted-foreground text-xs">Обложка</span>
+          {coverImage && (
+            <div className="bg-muted relative h-32 w-full overflow-hidden rounded-md">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={coverImage} alt="" className="h-full w-full object-cover" />
+            </div>
+          )}
+          <label
+            className={`hover:bg-muted w-fit cursor-pointer rounded-lg border px-4 py-2 text-sm font-medium ${isUploading ? "pointer-events-none opacity-60" : ""}`}
+          >
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              disabled={isUploading}
+              className="sr-only"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                void handleCoverFile(file);
+              }}
+            />
+            {isUploading ? "Загрузка..." : coverImage ? "Заменить обложку" : "Загрузить фото"}
+          </label>
+          {coverImage && (
+            <button
+              type="button"
+              onClick={() => setCoverImage("")}
+              className="text-muted-foreground hover:text-destructive w-fit text-xs"
+            >
+              Убрать обложку
+            </button>
+          )}
+        </div>
       </section>
 
       <section className="bg-card flex flex-col gap-3 rounded-xl border p-4">

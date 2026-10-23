@@ -10,12 +10,13 @@ from uuid import UUID
 import httpx
 import pytest
 from PIL import Image
-from sqlalchemy import event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from marketplace.b2b.integrations.fakes import DEMO_USER, FakeStorage
 from marketplace.b2b.models.entities import Base as B2BBase
+from marketplace.b2b.models.entities import Store
 from marketplace.goods.models.entities import Base as GoodsBase
 from marketplace.publications.models.entities import Base as PostsBase
 from marketplace.shared.app import create_app
@@ -148,7 +149,18 @@ async def onboard(client, username="shop_a"):
         json={"username": username, "displayName": "Мастерская", "bio": "Ручная работа"},
     )
     assert response.status_code == 200, response.text
-    return response.json()["data"]["seller"]
+    seller = response.json()["data"]["seller"]
+    if seller.get("onboardingStatus") == "active":
+        return seller
+    if "moderator-token" not in client.cookies:
+        logged = await client.post(
+            "/api/moderation/login",
+            json={"login": "moderator", "password": "moderator-local"},
+        )
+        assert logged.status_code == 200, logged.text
+    approved = await client.post(f"/api/moderation/shops/{seller['id']}/accept")
+    assert approved.status_code == 200, approved.text
+    return approved.json()["data"]
 
 
 async def upload(client):
@@ -157,10 +169,21 @@ async def upload(client):
     return response.json()["data"]
 
 
+async def set_yookassa_shop(client, shop_id="123456"):
+    app = client._transport.app
+    owner = UUID(client.headers["X-User-Id"])
+    async with app.state.sessions() as db:
+        store = await db.scalar(select(Store).where(Store.owner_user_id == owner))
+        assert store is not None
+        store.yookassa_shop_id = shop_id
+        await db.commit()
+    return {"yookassaShopId": shop_id}
+
+
 async def product(client, image_url, **overrides):
     payload = {
         "title": "Керамическая чашка",
-        "image": image_url,
+        "images": [image_url, image_url],
         "price": 1800,
         "saleMode": "deal_only",
         "dealContacts": "Телефон +7 999 000 00 00",

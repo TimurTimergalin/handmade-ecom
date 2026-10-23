@@ -12,6 +12,7 @@ export const ROUTES = {
   login: "/login",
   register: "/register",
   account: "/account",
+  adminOrders: "/admin/orders",
   orders: "/account/orders",
   orderDetail: (id: string) => `/account/orders/${id}`,
   product: (id: string) => `/product/${id}`,
@@ -51,11 +52,19 @@ export const SALE_MODE_LABELS: Record<SaleMode, string> = {
   deal_only: "По сделке",
 };
 
+/** «В наличии» и «нет в наличии» — один режим. Разница только в остатке. */
+export function saleAvailability(product: { saleMode: SaleMode; inStock: number }): SaleMode {
+  if (product.saleMode === "deal_only") return "deal_only";
+  return product.inStock > 0 ? "online" : "out_of_stock";
+}
+
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   created: "Создан",
   paid: "Оплачен",
   shipped: "Отправлен",
+  delivering: "Доставляется",
   delivered: "Доставлен",
+  completed: "Завершён",
   cancelled: "Отменён",
 };
 

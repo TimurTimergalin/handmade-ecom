@@ -30,6 +30,14 @@ class SellerRoleIn(BaseModel):
     display_name: str | None = Field(default=None, max_length=200, alias="displayName")
     bio: str | None = None
     avatar: str | None = None
+    legal_type: str | None = Field(default=None, alias="legalType")
+    last_name: str | None = Field(default=None, alias="lastName", max_length=100)
+    first_name: str | None = Field(default=None, alias="firstName", max_length=100)
+    patronymic: str | None = Field(default=None, max_length=100)
+    legal_name: str | None = Field(default=None, alias="legalName", max_length=300)
+    inn: str | None = Field(default=None, max_length=12)
+    ogrn: str | None = Field(default=None, max_length=15)
+    legal_address: str | None = Field(default=None, alias="legalAddress", max_length=500)
 
     @field_validator("username")
     @classmethod
@@ -177,6 +185,26 @@ def _seller_profile(
     return username, display_name, bio, avatar
 
 
+def _text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _assign_legal(seller: Seller, payload: SellerRoleIn) -> None:
+    if payload.legal_type not in {"person", "company"}:
+        return
+    seller.legal_type = payload.legal_type
+    seller.last_name = _text(payload.last_name)
+    seller.first_name = _text(payload.first_name)
+    seller.patronymic = _text(payload.patronymic)
+    seller.legal_name = _text(payload.legal_name)
+    seller.inn = _text(payload.inn)
+    seller.ogrn = _text(payload.ogrn)
+    seller.legal_address = _text(payload.legal_address)
+
+
 @router.get("/auth/me", tags=["b2b"])
 async def auth_me(request: Request, session: SessionDep) -> dict[str, Any]:
     user_id = user_id_from_auth_token(request.cookies.get(AuthConfig.auth_cookie_name))
@@ -236,6 +264,7 @@ async def put_seller_role(
         seller_by_id.display_name = display_name
         seller_by_id.bio = bio
         seller_by_id.avatar = avatar
+    _assign_legal(seller_by_id, payload)
     try:
         await session.flush()
     except IntegrityError:

@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -40,6 +41,10 @@ class Post(Timestamps, Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    moderation_status: Mapped[str | None] = mapped_column(String(16), default=None)
+    draft: Mapped[dict | None] = mapped_column(JSON, default=None)
+    draft_status: Mapped[str | None] = mapped_column(String(16), default=None)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, default=None)
     links: Mapped[list[PostProduct]] = relationship(
         cascade="all, delete-orphan", lazy="selectin", order_by="PostProduct.position"
     )

@@ -10,7 +10,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.app import BadRequestError, ForbiddenError, NotFoundError
@@ -135,9 +135,8 @@ async def upsert_published_post(session: AsyncSession, data: dict) -> Post:
             post.published_at = published_at
         elif post.published_at is None:
             post.published_at = datetime.now(UTC)
-        post.products.clear()
-        await session.flush()
 
+    await session.execute(delete(PostProduct).where(PostProduct.post_id == post.id))
     raw_products = data.get("productIds", data.get("product_ids")) or []
     seen: set[uuid.UUID] = set()
     position = 0
@@ -149,7 +148,7 @@ async def upsert_published_post(session: AsyncSession, data: dict) -> Post:
         if product_id in seen:
             continue
         seen.add(product_id)
-        post.products.append(PostProduct(product_id=product_id, position=position))
+        session.add(PostProduct(post_id=post.id, product_id=product_id, position=position))
         position += 1
     await session.flush()
     return post

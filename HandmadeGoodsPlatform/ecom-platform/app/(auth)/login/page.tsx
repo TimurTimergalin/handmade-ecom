@@ -1,5 +1,10 @@
 import { AuthTabs } from "@/components/features/AuthTabs";
 
-export default function LoginPage() {
-  return <AuthTabs mode="login" />;
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ intent?: string }>;
+}) {
+  const { intent } = await searchParams;
+  return <AuthTabs isSellerIntent={intent === "seller"} />;
 }

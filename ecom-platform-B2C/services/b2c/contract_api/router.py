@@ -11,9 +11,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from config import B2CSettings
-from contract_api.cookies import clear_auth_cookie, set_auth_cookie
+from contract_api.cookies import clear_auth_cookie, set_auth_cookie, set_refresh_cookie
 from contract_api.envelope import err, ok
-from contract_api.errors import ApiError, forbidden, not_found, server_error, validation_error
+from contract_api.errors import ApiError, forbidden, not_found, server_error, unauthorized, validation_error
 from contract_api.jwt_auth import issue_token, require_user_id, user_id_from_request
 from facade import FrontendFacade
 
@@ -54,7 +54,6 @@ class RegisterBody(BaseModel):
 class PatchMeBody(BaseModel):
     displayName: str | None = None
     bio: str | None = None
-    avatar: str | None = None
 
 
 class BecomeSellerBody(BaseModel):
@@ -75,19 +74,12 @@ class OrderGroupIn(BaseModel):
     pickupPoint: dict | None = None
 
 
-class ContactIn(BaseModel):
-    name: str
-    phone: str
-    email: EmailStr
-
-
 class CreateOrdersBody(BaseModel):
     groups: list[OrderGroupIn]
-    contact: ContactIn
 
 
 class ReceiveOrderBody(BaseModel):
-    receivalCode: str = Field(pattern=r"^\d{6}$")
+    receivalCode: str | None = Field(default=None, pattern=r"^\d{6}$")
 
 
 PLANS = [
@@ -118,26 +110,40 @@ PLANS = [
 ]
 
 
+def _session_cookies(response: Response, user_id: uuid.UUID, refresh: str) -> None:
+    settings = _s()
+    set_auth_cookie(response, settings, issue_token(settings, user_id))
+    set_refresh_cookie(response, settings, refresh)
+
+
 @router.post("/auth/login")
 async def auth_login(body: LoginBody) -> Response:
     user = await _f().login(body.email, body.password)
-    token = issue_token(_s(), uuid.UUID(user["id"]))
+    user_id = uuid.UUID(user["id"])
+    refresh = await _f()._up.issue_refresh(user_id)
     resp = ok({"user": user})
-    set_auth_cookie(resp, _s(), token)
+    _session_cookies(resp, user_id, refresh)
     return resp
 
 
 @router.post("/auth/register", status_code=201)
 async def auth_register(body: RegisterBody) -> Response:
     user = await _f().register(body.model_dump())
-    token = issue_token(_s(), uuid.UUID(user["id"]))
+    user_id = uuid.UUID(user["id"])
+    refresh = await _f()._up.issue_refresh(user_id)
     resp = ok({"user": user}, status_code=201)
-    set_auth_cookie(resp, _s(), token)
+    _session_cookies(resp, user_id, refresh)
     return resp
 
 
 @router.post("/auth/logout")
-async def auth_logout() -> Response:
+async def auth_logout(request: Request) -> Response:
+    refresh = request.cookies.get(_s().auth_refresh_cookie_name) or ""
+    if refresh:
+        try:
+            await _f()._up.revoke_refresh(refresh)
+        except Exception:
+            pass
     resp = ok(None)
     clear_auth_cookie(resp, _s())
     return resp
@@ -152,10 +158,13 @@ async def auth_me(request: Request) -> Response:
 
 @router.post("/auth/refresh")
 async def auth_refresh(request: Request) -> Response:
-    uid = require_user_id(request, _s())
-    token = issue_token(_s(), uid)
+    settings = _s()
+    raw = request.cookies.get(settings.auth_refresh_cookie_name) or ""
+    if not raw:
+        raise unauthorized()
+    user_id, refresh = await _f()._up.rotate_refresh(raw)
     resp = ok(None)
-    set_auth_cookie(resp, _s(), token)
+    _session_cookies(resp, user_id, refresh)
     return resp
 
 
@@ -199,7 +208,7 @@ async def auth_yandex_start(
             "client_id": settings.yandex_client_id,
             "redirect_uri": settings.yandex_redirect_uri,
             "state": state,
-            "scope": "login:info login:email",
+            "scope": "login:info login:email login:default_phone",
         }
     )
     response = RedirectResponse(
@@ -218,8 +227,10 @@ async def auth_yandex(request: Request, body: YandexCodeBody) -> Response:
         raise validation_error("Сессия входа устарела. Нажмите «Войти через Яндекс» ещё раз")
     user = await _f().login_yandex(body.code)
     destination = request.cookies.get("yandex-oauth-next") or "/"
+    user_id = uuid.UUID(user["id"])
+    refresh = await _f()._up.issue_refresh(user_id)
     resp = ok({"user": user, "next": _safe_next(destination, seller=False)})
-    set_auth_cookie(resp, _s(), issue_token(_s(), uuid.UUID(user["id"])))
+    _session_cookies(resp, user_id, refresh)
     _oauth_cookie(resp, "yandex-oauth-state", "", 0)
     _oauth_cookie(resp, "yandex-oauth-next", "", 0)
     return resp
@@ -512,6 +523,24 @@ async def orders_list(
     return ok(data)
 
 
+@router.get("/admin/orders")
+async def admin_orders() -> Response:
+    return ok(await _f()._up.admin_orders())
+
+
+class StatusOverrideBody(BaseModel):
+    status: str | None = None
+
+
+@router.patch("/admin/orders/{order_id}")
+async def admin_set_status(order_id: str, body: StatusOverrideBody) -> Response:
+    allowed = {None, "created", "paid", "shipped", "delivering", "delivered", "completed", "cancelled"}
+    if body.status not in allowed:
+        raise validation_error("Неизвестный статус")
+    updated = await _f()._up.set_status_override(uuid.UUID(order_id), body.status)
+    return ok(updated)
+
+
 @router.get("/orders/{order_id}")
 async def orders_get(order_id: str, request: Request) -> Response:
     uid = require_user_id(request, _s())
@@ -524,6 +553,20 @@ async def orders_receive(order_id: str, request: Request, body: ReceiveOrderBody
     uid = require_user_id(request, _s())
     order = await _f().receive_order(uuid.UUID(order_id), uid, body.receivalCode)
     return ok(order)
+
+
+@router.post("/orders/{order_id}/cancel")
+async def orders_cancel(order_id: str, request: Request) -> Response:
+    uid = require_user_id(request, _s())
+    order = await _f().cancel_order(uuid.UUID(order_id), uid)
+    return ok(order)
+
+
+@router.post("/orders/{order_id}/pay")
+async def orders_pay(order_id: str, request: Request) -> Response:
+    uid = require_user_id(request, _s())
+    data = await _f().repay_order(uuid.UUID(order_id), uid)
+    return ok(data)
 
 
 @router.get("/plans")
@@ -573,6 +616,58 @@ async def _read_processor_order(order_id: str) -> dict:
     if not isinstance(body, dict):
         raise server_error("Не удалось прочитать заказ")
     return body
+
+
+@router.get("/payments/test-subscription/{reference}")
+async def test_subscription(reference: str) -> Response:
+    return ok(await _read_processor_subscription(reference))
+
+
+@router.post("/payments/test-subscription/{reference}")
+async def confirm_test_subscription(reference: str) -> Response:
+    try:
+        uuid.UUID(reference)
+    except ValueError as exc:
+        raise validation_error("Некорректный номер платежа") from exc
+    base = _processor_base()
+    if not base:
+        raise server_error("Тестовая оплата не настроена")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(f"{base}/v1/subscriptions/{reference}/fake-pay")
+    except httpx.HTTPError as exc:
+        raise server_error("Сервис заказов недоступен") from exc
+    if response.status_code == 404:
+        raise not_found("Тестовая оплата недоступна")
+    if response.status_code >= 400:
+        raise server_error("Не удалось подтвердить тестовую оплату")
+    body = response.json()
+    if not isinstance(body, dict):
+        raise server_error("Не удалось подтвердить тестовую оплату")
+    return ok(_test_payment_body(body))
+
+
+async def _read_processor_subscription(reference: str) -> dict:
+    try:
+        uuid.UUID(reference)
+    except ValueError as exc:
+        raise validation_error("Некорректный номер платежа") from exc
+    base = _processor_base()
+    if not base:
+        raise server_error("Тестовая оплата не настроена")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{base}/v1/subscriptions/{reference}")
+    except httpx.HTTPError as exc:
+        raise server_error("Сервис заказов недоступен") from exc
+    if response.status_code == 404:
+        raise not_found("Платёж не найден")
+    if response.status_code >= 400:
+        raise server_error("Не удалось прочитать платёж")
+    body = response.json()
+    if not isinstance(body, dict):
+        raise server_error("Не удалось прочитать платёж")
+    return _test_payment_body(body)
 
 
 @router.get("/payments/test/{order_id}")

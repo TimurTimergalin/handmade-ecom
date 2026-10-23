@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     s3_secret_key: str = ""
     s3_bucket: str = "handmade-media"
     s3_public_url: str = "http://localhost:9000/handmade-media"
+    moderator_login: str = "moderator"
+    moderator_password: str = "moderator-local"
+    moderator_secret: str = "moderator-dev-secret"
+    yookassa_oauth_client_id: str = ""
+    yookassa_oauth_client_secret: str = ""
+    yookassa_oauth_redirect_uri: str = "http://localhost:8090/api/seller/yookassa/callback"
+    yookassa_oauth_fake: bool = True
+    yookassa_stub_public_url: str = "http://localhost:8095"
+    yookassa_stub_url: str = "http://order-processor:8000"
+    seller_profile_url: str = "http://localhost:3000/seller/profile"
 
     @property
     def kafka_group_id(self) -> str:
@@ -128,6 +138,10 @@ class Settings(BaseSettings):
                 raise ValueError("Development adapters are forbidden in production")
             if len(self.service_key) < 32:
                 raise ValueError("SERVICE_KEY must have at least 32 characters")
+            if self.service == "b2b" and (
+                self.moderator_password == "moderator-local" or len(self.moderator_password) < 12
+            ):
+                raise ValueError("MODERATOR_PASSWORD must be set to a non-default value")
             if (
                 self.service == "b2b"
                 and not self.auth_delegated

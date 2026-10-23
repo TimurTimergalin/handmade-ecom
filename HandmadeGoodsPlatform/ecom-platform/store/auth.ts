@@ -1,7 +1,7 @@
 // store/auth.ts
 import { create } from "zustand";
 
-import { b2c, readData } from "@/lib/axios";
+import { b2c, HttpError, readData } from "@/lib/axios";
 import { becomeSeller as requestBecomeSeller } from "@/services/api";
 import type { ApiResponse, User, UserRole } from "@/types";
 
@@ -12,7 +12,19 @@ interface AuthState {
   register: (email: string, password: string) => Promise<void>;
   loginWithYandex: (isSellerIntent?: boolean) => Promise<void>;
   logout: () => Promise<void>;
-  becomeSeller: (input: { username: string; displayName: string; bio?: string }) => Promise<void>;
+  becomeSeller: (input: {
+    username: string;
+    displayName: string;
+    bio?: string;
+    legalType: "person" | "company";
+    lastName?: string;
+    firstName?: string;
+    patronymic?: string;
+    legalName?: string;
+    inn: string;
+    ogrn?: string;
+    legalAddress?: string;
+  }) => Promise<void>;
   updateProfile: (updates: Partial<Pick<User, "displayName" | "bio" | "avatar">>) => Promise<void>;
   isAuthenticated: () => boolean;
   hasRole: (role: UserRole) => boolean;
@@ -32,12 +44,21 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   ready: false,
 
   hydrate: async () => {
-    try {
-      const user = await fetchMe();
-      set({ user, ready: true });
-    } catch {
-      set({ user: null, ready: true });
+    const delays = [0, 400, 1200];
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      if (delays[attempt] > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+      try {
+        const user = await fetchMe();
+        set({ user, ready: true });
+        return;
+      } catch (error) {
+        const status = error instanceof HttpError ? error.status : 0;
+        if (status === 401 || status === 403) break;
+      }
     }
+    set({ user: null, ready: true });
   },
 
   loginWithEmail: async (email, password) => {

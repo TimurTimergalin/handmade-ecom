@@ -71,6 +71,7 @@ def create_app(settings: Settings, *, transport=None):
     )
     if settings.service == "b2b":
         from marketplace.b2b.api.routes import router
+        from marketplace.b2b.api.moderation import router as moderation_router
         from marketplace.b2b.integrations.external import (
             AnalyticsClient,
             OrderServiceClient,
@@ -115,6 +116,7 @@ def create_app(settings: Settings, *, transport=None):
         )
         # S3 is real even when external-team adapters are fake.
         app.state.storage = S3StorageClient(settings)
+        app.include_router(moderation_router, prefix=settings.api_prefix)
     elif settings.service == "goods":
         from marketplace.goods.api.routes import router
     else:

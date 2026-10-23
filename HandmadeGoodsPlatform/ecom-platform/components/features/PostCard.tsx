@@ -10,7 +10,7 @@ import type { Post } from "@/types";
 export function PostCard({ post }: { post: Post }) {
   return (
     <article className="bg-card flex flex-col gap-3 rounded-xl border p-4">
-      <SellerHeader seller={post.seller} />
+      <SellerHeader seller={post.seller} showFollow={false} />
 
       <div className="flex flex-col gap-2">
         <h2 className="text-lg leading-tight font-semibold">
@@ -41,15 +41,7 @@ export function PostCard({ post }: { post: Post }) {
         </div>
       )}
 
-      <div className="text-muted-foreground flex items-center gap-4 text-xs">
-        <Link href={ROUTES.post(post.id)} className="hover:text-foreground">
-          ♥ {post.likesCount}
-        </Link>
-        <Link href={ROUTES.post(post.id)} className="hover:text-foreground">
-          💬 {post.commentsCount}
-        </Link>
-        <span className="ml-auto">{timeAgo(post.createdAt)}</span>
-      </div>
+      <div className="text-muted-foreground text-xs">{timeAgo(post.createdAt)}</div>
     </article>
   );
 }

@@ -1,4 +1,4 @@
-import { AuthTabs } from "@/components/features/AuthTabs";
+import { redirect } from "next/navigation";
 
 export default async function RegisterPage({
   searchParams,
@@ -6,6 +6,5 @@ export default async function RegisterPage({
   searchParams: Promise<{ intent?: string }>;
 }) {
   const { intent } = await searchParams;
-
-  return <AuthTabs mode="register" isSellerIntent={intent === "seller"} />;
+  redirect(intent === "seller" ? "/login?intent=seller" : "/login");
 }

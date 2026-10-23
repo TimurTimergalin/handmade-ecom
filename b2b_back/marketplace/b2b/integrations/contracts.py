@@ -58,7 +58,7 @@ class OrderSummary(DTO):
 
 class Charge(DTO):
     reference: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,200}$")
-    payment_url: str = Field(pattern=r"^https://[^\s]+$")
+    payment_url: str = Field(pattern=r"^https?://[^\s]+$")
     status: str
 
 
@@ -69,6 +69,7 @@ class SubscriptionState(DTO):
     tier: str
     valid_until: datetime | None = None
     online_payments: bool = False
+    payment_method_id: str | None = None
 
 
 class UserService(Protocol):

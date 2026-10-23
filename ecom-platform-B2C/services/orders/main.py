@@ -4,15 +4,14 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import b2b_api
+import routes
 from common.app import DatabaseSettings, create_app
 from common.db import Database, init_tables
 from common.kafka import EventProducer
 from fastapi import FastAPI
-from sqlalchemy import text
-
-import b2b_api
-import routes
 from models import Base
+from sqlalchemy import text
 
 settings = DatabaseSettings(
     service_name="orders",
@@ -39,6 +38,35 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with db.engine.begin() as connection:
         await connection.execute(
             text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payout_token VARCHAR(512)")
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS yookassa_account_id VARCHAR(128)")
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS multi_order_id VARCHAR(64)")
+        )
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_orders_multi_order_id ON orders (multi_order_id)"
+            )
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ALTER COLUMN delivery_amount SET DEFAULT 0")
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cdek_office_code VARCHAR(64)")
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cdek_order_uuid VARCHAR(64)")
+        )
+        await connection.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS status_override VARCHAR(32)")
+        )
+        await connection.execute(
+            text(
+                "UPDATE orders SET status = 'delivered' "
+                "WHERE delivery_method = 'pickup' AND status = 'shipped'"
+            )
         )
     await producer.start()
     yield

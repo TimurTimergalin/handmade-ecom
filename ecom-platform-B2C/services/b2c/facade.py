@@ -5,7 +5,8 @@ from decimal import Decimal
 from typing import Any
 
 from clients import Upstreams
-from contract_api.errors import forbidden, not_found, unauthorized, validation_error
+from common.app import BadRequestError, NotFoundError, UpstreamError
+from contract_api.errors import ApiError, forbidden, not_found, unauthorized, validation_error
 from mappers import (
     comment_from_upstream,
     hydrate_products,
@@ -13,6 +14,7 @@ from mappers import (
     product_from_upstream,
     seller_from_upstream,
 )
+from routes_cdek import office_code_for_seller, quote_delivery_price
 
 
 def _comment_body(body: str) -> str:
@@ -90,6 +92,12 @@ class FrontendFacade:
             raise validation_error(
                 "Яндекс не передал почту. Разрешите доступ к адресу электронной почты"
             )
+        phone_raw = info.get("default_phone")
+        phone = ""
+        if isinstance(phone_raw, dict):
+            phone = str(phone_raw.get("number") or "").strip()
+        elif isinstance(phone_raw, str):
+            phone = phone_raw.strip()
         display = (
             info.get("real_name")
             or info.get("display_name")
@@ -105,6 +113,7 @@ class FrontendFacade:
                 "email": email,
                 "display_name": str(display)[:200],
                 "login": str(info.get("login") or "")[:64],
+                "phone": phone[:32] or None,
             }
         )
 
@@ -437,6 +446,16 @@ class FrontendFacade:
             out.append(post)
         return out
 
+    async def _buyer_contacts(self, user_id: uuid.UUID) -> tuple[str, str, str]:
+        try:
+            buyer = await self._up.get_user(user_id)
+        except Exception:
+            return "", "", ""
+        name = str(buyer.get("displayName") or buyer.get("display_name") or "")
+        email = str(buyer.get("email") or "")
+        phone = str(buyer.get("phone") or "").strip()
+        return name, email, phone
+
     async def create_orders_from_cart(
         self,
         user_id: uuid.UUID,
@@ -444,10 +463,10 @@ class FrontendFacade:
         payment_url: str,
     ) -> dict:
         groups = body.get("groups") or []
-        contact = body.get("contact") or {}
+        buyer_name, buyer_email, buyer_phone = await self._buyer_contacts(user_id)
         if not groups:
             raise validation_error("groups обязателен")
-        orders_out = []
+        prepared: list[dict[str, Any]] = []
         for group in groups:
             seller_id = group.get("sellerId")
             delivery = group.get("delivery", "cdek")
@@ -467,6 +486,12 @@ class FrontendFacade:
                     raise validation_error("Товар недоступен для покупки", productId=str(product_id))
                 if int(offer.get("stock", 0)) < qty:
                     raise validation_error("Недостаточно на складе", productId=str(product_id))
+                product_seller = str(raw.get("seller_id") or "")
+                if seller_id and product_seller != str(seller_id):
+                    raise validation_error(
+                        "Товар принадлежит другому продавцу",
+                        productId=str(product_id),
+                    )
                 order_items.append(
                     {
                         "product_id": str(product_id),
@@ -480,31 +505,122 @@ class FrontendFacade:
                         "price_amount": str(offer["price_amount"]),
                     }
                 )
-            pickup = group.get("pickupPoint")
+            resolved_seller = seller_id or order_items[0]["seller_id"]
+            try:
+                seller_uuid = uuid.UUID(str(resolved_seller))
+            except (TypeError, ValueError) as exc:
+                raise validation_error("Не указан продавец") from exc
+            shop_id = await self._up.seller_yookassa_shop_id(seller_uuid)
+            if not shop_id:
+                raise validation_error(
+                    "У продавца не подключён магазин ЮKassa. Оплата невозможна.",
+                    sellerId=str(seller_uuid),
+                )
+            raw_pickup = group.get("pickupPoint")
+            pickup = raw_pickup if isinstance(raw_pickup, dict) else None
             address = None
-            if pickup:
-                address = f"{pickup.get('city')}, {pickup.get('address')}"
             method = "pickup" if delivery == "pickup" else "cdek"
-            payout_token = None
-            if seller_id:
-                payout_token = await self._up.seller_payout_token(uuid.UUID(str(seller_id)))
-            payload = {
-                "user_id": str(user_id),
-                "items": order_items,
-                "delivery_method": method,
-                "delivery_address": address,
-                "recipient_name": contact.get("name", ""),
-                "recipient_phone": contact.get("phone", ""),
-                "comment": contact.get("email"),
-                "payout_token": payout_token,
-            }
-            order = await self._up.create_order(payload)
-            if not orders_out:
-                remote_payment = order.get("payment_url") or order.get("paymentUrl")
-                if remote_payment:
-                    payment_url = remote_payment
-            orders_out.append(await self._map_order(order, user_id))
+            if method == "cdek" and not buyer_phone:
+                raise validation_error("СДЭК недоступен без номера телефона в Яндекс ID")
+            cdek_fields: dict[str, str] = {}
+            if method == "cdek":
+                code = str((pickup or {}).get("code") or "").strip()
+                if not code:
+                    raise validation_error("Выберите пункт выдачи СДЭК")
+                item_count = sum(int(item["quantity"]) for item in order_items)
+                try:
+                    from_code = await office_code_for_seller(str(seller_uuid))
+                except BadRequestError as exc:
+                    raise validation_error(exc.message) from exc
+                try:
+                    price = await quote_delivery_price(from_code, code, item_count)
+                except UpstreamError as exc:
+                    raise validation_error("Не удалось рассчитать доставку СДЭК") from exc
+                city = str((pickup or {}).get("city") or "").strip()
+                street = str((pickup or {}).get("address") or "").strip()
+                address = f"{city}, {street}" if city and street else street or city or None
+                cdek_fields = {
+                    "delivery_amount": format(Decimal(price).quantize(Decimal("0.01")), "f"),
+                    "cdek_office_code": code,
+                }
+            elif pickup:
+                address = f"{pickup.get('city')}, {pickup.get('address')}"
+            prepared.append(
+                {
+                    "seller_id": str(seller_uuid),
+                    "yookassa_account_id": shop_id,
+                    "items": order_items,
+                    "delivery_method": method,
+                    "delivery_address": address,
+                    "recipient_name": buyer_name,
+                    "recipient_phone": buyer_phone if method == "cdek" else "",
+                    "comment": buyer_email or None,
+                    **cdek_fields,
+                }
+            )
+        if not prepared:
+            raise validation_error("В заказе нет товаров")
+        reserved = await self._reserve_stock(prepared)
+        try:
+            created = await self._up.create_checkout({"user_id": str(user_id), "groups": prepared})
+        except Exception:
+            await self._release_stock(reserved)
+            raise
+        remote_payment = created.get("payment_url") or created.get("paymentUrl")
+        if remote_payment:
+            payment_url = remote_payment
+        orders_out = [
+            await self._map_order(order, user_id) for order in created.get("orders") or []
+        ]
         return {"orders": orders_out, "paymentUrl": payment_url}
+
+    async def _reserve_stock(self, groups: list[dict[str, Any]]) -> list[tuple[str, int]]:
+        reserved: list[tuple[str, int]] = []
+        try:
+            for group in groups:
+                for item in group["items"]:
+                    product_id = str(item["product_id"])
+                    qty = int(item["quantity"])
+                    try:
+                        await self._up.adjust_catalog_stock(uuid.UUID(product_id), -qty)
+                    except ApiError as exc:
+                        if exc.http_status == 409:
+                            raise validation_error(
+                                "Недостаточно на складе", productId=product_id
+                            ) from exc
+                        raise
+                    reserved.append((product_id, qty))
+                    try:
+                        await self._up.adjust_storefront_stock(uuid.UUID(product_id), -qty)
+                    except ApiError as exc:
+                        if exc.http_status == 409:
+                            raise validation_error(
+                                "Недостаточно на складе", productId=product_id
+                            ) from exc
+                        raise
+        except Exception:
+            await self._release_stock(reserved)
+            raise
+        return reserved
+
+    async def _release_stock(self, reserved: list[tuple[str, int]]) -> None:
+        for product_id, qty in reversed(reserved):
+            try:
+                await self._up.adjust_catalog_stock(uuid.UUID(product_id), qty)
+            except Exception:
+                pass
+            try:
+                await self._up.adjust_storefront_stock(uuid.UUID(product_id), qty)
+            except Exception:
+                pass
+
+    async def repay_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+        order = await self._up.get_order(order_id)
+        if str(order.get("user_id")) != str(user_id):
+            raise forbidden()
+        updated = await self._up.repay_order(order_id)
+        payment = updated.get("payment_url") or updated.get("paymentUrl")
+        return {"order": await self._map_order(updated, user_id), "paymentUrl": payment}
 
     async def list_orders(
         self,
@@ -531,6 +647,13 @@ class FrontendFacade:
             raise forbidden()
         return await self._map_order(order, user_id)
 
+    async def cancel_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+        order = await self._up.get_order(order_id)
+        if str(order.get("user_id")) != str(user_id):
+            raise forbidden()
+        updated = await self._up.cancel_order(order_id, user_id)
+        return await self._map_order(updated, user_id)
+
     async def receive_order(
         self, order_id: uuid.UUID, user_id: uuid.UUID, receival_code: str
     ) -> dict:
@@ -556,24 +679,52 @@ class FrontendFacade:
         subscribed = await self._subscribed_ids(viewer_id)
         line_items = []
         for it in items_raw:
-            raw = await self._up.get_product(uuid.UUID(str(it["product_id"])))
             s = dict(seller)
             s["isFollowing"] = str(seller.get("id")) in subscribed
+            try:
+                raw = await self._up.get_product(uuid.UUID(str(it["product_id"])))
+                product = product_from_upstream(raw, s)
+            except NotFoundError:
+                product = product_from_upstream(
+                    {
+                        "id": str(it["product_id"]),
+                        "title": it.get("title") or "Товар удалён",
+                        "image": it.get("image_url") or "",
+                        "seller_id": str(seller.get("id") or it.get("seller_id") or ""),
+                        "sale_mode": "out_of_stock",
+                        "available_deliveries": [],
+                        "created_at": order.get("created_at"),
+                        "offers": [
+                            {
+                                "id": str(it.get("offer_id") or it["product_id"]),
+                                "is_default": True,
+                                "price_amount": it.get("price_amount") or 0,
+                                "stock": 0,
+                            }
+                        ],
+                    },
+                    s,
+                )
             line_items.append(
                 {
-                    "product": product_from_upstream(raw, s),
+                    "product": product,
                     "quantity": it["quantity"],
                 }
             )
         delivery = order.get("delivery_method", "cdek")
         if delivery not in ("pickup", "cdek"):
             delivery = "cdek"
-        status = order.get("status", "created")
+        status = order.get("status_override") or order.get("status", "created")
         if status == "assembling":
             status = "paid"
-        if status not in ("created", "paid", "shipped", "delivered", "cancelled"):
+        if delivery == "pickup" and status == "shipped":
+            status = "delivered"
+        if status not in ("created", "paid", "shipped", "delivering", "delivered", "completed", "cancelled"):
             status = "created"
-        tracking = order.get("tracking_number") or order.get("receival_code") or None
+        tracking = order.get("tracking_number") or None
+        if delivery == "cdek":
+            tracking = order.get("tracking_number") or None
+        receival = order.get("receival_code") if delivery == "pickup" else None
         dto = OrderDTO(
             id=str(order["id"]),
             createdAt=order.get("created_at"),
@@ -583,6 +734,7 @@ class FrontendFacade:
             items=[OrderItemDTO.model_validate(x) for x in line_items],
             delivery=delivery,
             pickupPoint=_pickup_point(delivery, order.get("delivery_address")),
+            receivalCode=receival,
             trackingNumber=tracking,
             total=int(Decimal(str(order.get("total_amount", 0)))),
         )

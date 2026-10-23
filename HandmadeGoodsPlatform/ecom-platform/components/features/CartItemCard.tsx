@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Minus, Plus, Trash2 } from "lucide-react";
 
 import { useCartStore } from "@/store/cart";
-import { ROUTES, DELIVERY_LABELS } from "@/lib/constants";
+import { ROUTES } from "@/lib/constants";
 import { formatPrice, cn } from "@/lib/utils";
 import type { CartItem, Product } from "@/types";
 
@@ -42,15 +42,13 @@ export function CartItemCard({
 
         <div className="text-muted-foreground text-sm">{formatPrice(product.price)}</div>
 
-        <div className="text-muted-foreground text-xs">{DELIVERY_LABELS[item.delivery]}</div>
-
         {unavailable ? (
           <div className="text-destructive mt-1 text-xs font-medium">Нет в наличии</div>
         ) : (
           <div className="mt-1 flex items-center gap-2">
             <button
               type="button"
-              onClick={() => updateQuantity(product.id, item.delivery, item.quantity - 1)}
+              onClick={() => updateQuantity(product.id, item.quantity - 1)}
               disabled={item.quantity <= 1}
               className="hover:bg-muted flex h-7 w-7 items-center justify-center rounded-md border disabled:opacity-40"
               aria-label="Уменьшить"
@@ -60,8 +58,9 @@ export function CartItemCard({
             <span className="min-w-[2ch] text-center text-sm font-medium">{item.quantity}</span>
             <button
               type="button"
-              onClick={() => updateQuantity(product.id, item.delivery, item.quantity + 1)}
-              className="hover:bg-muted flex h-7 w-7 items-center justify-center rounded-md border"
+              onClick={() => updateQuantity(product.id, item.quantity + 1)}
+              disabled={item.quantity >= product.inStock}
+              className="hover:bg-muted flex h-7 w-7 items-center justify-center rounded-md border disabled:opacity-40"
               aria-label="Увеличить"
             >
               <Plus className="h-3 w-3" />
@@ -74,7 +73,7 @@ export function CartItemCard({
         <div className="text-sm font-bold">{formatPrice(lineTotal)}</div>
         <button
           type="button"
-          onClick={() => removeItem(product.id, item.delivery)}
+          onClick={() => removeItem(product.id)}
           className="text-muted-foreground hover:text-destructive transition-colors"
           aria-label="Удалить"
         >

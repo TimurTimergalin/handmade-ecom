@@ -6,15 +6,10 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { ExternalLink } from "lucide-react";
 
-import {
-  getSellerProfile,
-  getSellerSubscription,
-  updateSellerProfile,
-  uploadImage,
-  type PayoutCard,
-} from "@/services/api";
-import { PayoutCardWidget } from "@/components/features/PayoutCardWidget";
+import { getSellerProfile, getSellerSubscription, revertSellerProfile, updateSellerProfile, uploadImage } from "@/services/api";
+import { b2b, readData } from "@/lib/axios";
 import { ROUTES } from "@/lib/constants";
+import type { ApiResponse } from "@/types";
 
 const AVATAR_FALLBACK = "https://ui-avatars.com/api/?name=U&size=150";
 
@@ -22,26 +17,52 @@ export function SellerProfileForm() {
   const [displayName, setDisplayName] = useState("");
   const [bio, setBio] = useState("");
   const [avatar, setAvatar] = useState("");
+  const [uploadedAvatar, setUploadedAvatar] = useState<string | null>(null);
   const [username, setUsername] = useState("");
-  const [payoutLinked, setPayoutLinked] = useState(false);
-  const [payoutCard, setPayoutCard] = useState<PayoutCard | null>(null);
+  const [yookassaShopId, setYookassaShopId] = useState("");
   const [tier, setTier] = useState<string | null>(null);
-  const payoutRequired = tier === "premium";
+  const shopRequired = tier === "premium";
   const [isReady, setIsReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [profileStatus, setProfileStatus] = useState<"pending" | "rejected" | null>(null);
+  const [profileReason, setProfileReason] = useState<string | null>(null);
+  const [isReverting, setIsReverting] = useState(false);
+
+  function showProfile(profile: Awaited<ReturnType<typeof getSellerProfile>>) {
+    const draft = profile.profileStatus && profile.profileDraft ? profile.profileDraft : null;
+    setDisplayName(draft?.displayName ?? profile.displayName ?? "");
+    setBio(draft?.bio ?? profile.bio ?? "");
+    setAvatar(draft?.avatar ?? profile.avatar ?? "");
+    setUsername(profile.username ?? "");
+    setYookassaShopId(profile.yookassaShopId ?? "");
+    setProfileStatus(profile.profileStatus ?? null);
+    setProfileReason(profile.profileRejectionReason ?? null);
+  }
+
+  useEffect(() => {
+    const flag = new URLSearchParams(window.location.search).get("yookassa");
+    if (flag === "connected") toast.success("Магазин ЮKassa подключён");
+    if (flag === "denied") toast.error("Подключение ЮKassa отменено");
+    if (flag === "error") toast.error("Не удалось подключить ЮKassa");
+  }, []);
+
+  async function connectYookassa() {
+    try {
+      const data = await readData(b2b.get<ApiResponse<{ url: string }>>("/api/seller/yookassa/connect"));
+      if (!data?.url) throw new Error("Не удалось начать подключение");
+      window.location.assign(data.url);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось начать подключение");
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([getSellerProfile(), getSellerSubscription().catch(() => null)])
       .then(([profile, subscription]) => {
         if (cancelled) return;
-        setDisplayName(profile.displayName ?? "");
-        setBio(profile.bio ?? "");
-        setAvatar(profile.avatar ?? "");
-        setUsername(profile.username ?? "");
-        setPayoutLinked(Boolean(profile.payoutToken));
-        setPayoutCard(profile.payoutCard ?? null);
+        showProfile(profile);
         setTier(subscription?.tier ?? null);
         setIsReady(true);
       })
@@ -59,8 +80,9 @@ export function SellerProfileForm() {
       toast.error("Имя не может быть пустым");
       return;
     }
-    if (payoutRequired && !payoutLinked) {
-      toast.error("На тарифе Premium привяжите карту для выплат");
+    const shopId = yookassaShopId.trim();
+    if (shopRequired && !shopId) {
+      toast.error("На Premium сначала подключите магазин ЮKassa");
       return;
     }
 
@@ -69,17 +91,33 @@ export function SellerProfileForm() {
       const saved = await updateSellerProfile({
         displayName: displayName.trim(),
         bio: bio.trim(),
-        avatar: avatar.trim(),
+        ...(uploadedAvatar ? { avatar: uploadedAvatar } : {}),
       });
-      setDisplayName(saved.displayName ?? "");
-      setBio(saved.bio ?? "");
-      setAvatar(saved.avatar ?? "");
-      setUsername(saved.username ?? username);
-      toast.success("Профиль обновлён");
+      showProfile(saved);
+      setUploadedAvatar(null);
+      toast.success(
+        saved.profileStatus === "pending"
+          ? "Изменения профиля отправлены на модерацию"
+          : "Профиль обновлён"
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось сохранить профиль");
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleRevert() {
+    setIsReverting(true);
+    try {
+      const saved = await revertSellerProfile();
+      showProfile(saved);
+      setUploadedAvatar(null);
+      toast.success("Изменения отменены");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось откатить изменения");
+    } finally {
+      setIsReverting(false);
     }
   }
 
@@ -89,6 +127,7 @@ export function SellerProfileForm() {
     try {
       const url = await uploadImage(file);
       setAvatar(url);
+      setUploadedAvatar(url);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось загрузить изображение");
     } finally {
@@ -103,6 +142,22 @@ export function SellerProfileForm() {
   return (
     <div className="flex max-w-2xl flex-col gap-6">
       <section className="bg-card flex flex-col gap-4 rounded-xl border p-4">
+        {profileStatus === "pending" && (
+          <div className="flex flex-col gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p>Изменения названия, описания и аватара на модерации. На витрине пока прежние данные.</p>
+            <button
+              type="button"
+              onClick={handleRevert}
+              disabled={isReverting}
+              className="w-fit rounded-md border border-amber-800 px-3 py-1 text-xs font-medium disabled:opacity-60"
+            >
+              {isReverting ? "Откатываем..." : "Откатить изменения"}
+            </button>
+          </div>
+        )}
+        {profileStatus === "rejected" && profileReason && (
+          <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{profileReason}</div>
+        )}
         <div className="flex items-center gap-4">
           <div className="bg-muted relative h-20 w-20 shrink-0 overflow-hidden rounded-full">
             <Image
@@ -136,39 +191,43 @@ export function SellerProfileForm() {
           />
         </label>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-muted-foreground text-xs">URL аватара</span>
-          <input
-            value={avatar}
-            onChange={(e) => setAvatar(e.target.value)}
-            placeholder="https://..."
-            className="bg-background focus:ring-primary/30 rounded-md border px-3 py-2 text-sm outline-none focus:ring-2"
-          />
-        </label>
-        <label className="text-muted-foreground flex items-center gap-2 text-xs">
+        <label
+          className={`hover:bg-muted w-fit cursor-pointer rounded-lg border px-4 py-2 text-sm font-medium ${isUploading ? "pointer-events-none opacity-60" : ""}`}
+        >
           <input
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             disabled={isUploading}
-            className="text-xs"
+            className="sr-only"
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
               void handleAvatarFile(file);
             }}
           />
-          {isUploading ? "Загрузка..." : "или загрузите файл"}
+          {isUploading ? "Загрузка..." : "Загрузить фото"}
         </label>
 
-        <PayoutCardWidget
-          required={payoutRequired}
-          linked={payoutLinked}
-          card={payoutCard}
-          onChange={({ linked, card }) => {
-            setPayoutLinked(linked);
-            setPayoutCard(card);
-          }}
-        />
+        <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
+          <span className="text-sm font-medium">Магазин ЮKassa</span>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            Подключите магазин через тестовую ЮKassa. Номер магазина выдаст заглушка после
+            подтверждения.
+            {shopRequired ? " На Premium подключение обязательно." : ""}
+          </p>
+          {yookassaShopId ? (
+            <p className="text-sm">Магазин подключён: {yookassaShopId}</p>
+          ) : (
+            <p className="text-muted-foreground text-sm">Магазин ещё не подключён.</p>
+          )}
+          <button
+            type="button"
+            onClick={connectYookassa}
+            className="hover:bg-muted w-fit rounded-lg border px-4 py-2 text-sm font-medium"
+          >
+            {yookassaShopId ? "Подключить другой магазин" : "Подключить ЮKassa"}
+          </button>
+        </div>
 
         <label className="flex flex-col gap-1">
           <span className="text-muted-foreground text-xs">О магазине</span>
